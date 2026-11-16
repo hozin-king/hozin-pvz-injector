@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- v1.1: TANPA <queries>, getPackageInfo() untuk aplikasi lain selalu
+         lempar NameNotFoundException di Android 11+ (targetSdk 34) — itulah
+         kenapa v1.0 bilang "PvZ2 TIDAK terinstall" padahal game jalan. -->
+    <queries>
+        <package android:name="com.ea.game.pvzfree_row" />
+    </queries>
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"

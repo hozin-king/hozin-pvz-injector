@@ -1,28 +1,57 @@
 package com.hozinking.pvzinjector
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import java.io.File
 
 /**
- * libinjector.so dan libpayload.so masuk ke applicationInfo.nativeLibraryDir
- * karena AGP membundelnya di sana seperti native library biasa.
+ * Hozin PvZ Injector v1.1 — jembatan Kotlin ↔ native injector.
  *
- * Payload TIDAK di-dlopen dari nativeLibraryDir: proses game (UID game)
- * belum tentu bisa membaca direktori privat aplikasi ini. Sebelum inject,
- * payload disalin (via su) ke /data/local/tmp/hozinpvz_payload.so — jalur
- * yang sama dipakai mod BUSSID/TR yang terbukti jalan di POCO — lalu
- * injector dipanggil dengan path itu.
+ * Pelajaran v1.0 (tes POCO 21:53):
+ * - "PvZ2 TIDAK terinstall" padahal PID game ketemu. Akar: manifest v1.0
+ *   tanpa <queries> → di Android 11+ getPackageInfo() untuk aplikasi lain
+ *   selalu lempar NameNotFoundException. v1.1 menambah <queries> DAN
+ *   cross-check: bila proses game JALAN, game PASTI terinstall — jangan
+ *   pernah cetak "TIDAK terinstall" saat PID ada (satu sumber kebenaran).
+ * - JANGAN PERNAH pakai `pm` / `cmd package` / `dumpsys package` untuk
+ *   deteksi (rusak di POCO user, pelajaran 28 Okt 2026). Deteksi hanya
+ *   via PackageManager API + scan /proc (pidof + fallback cmdline).
+ *
+ * v1.1 AGNOSTIK VERSI: TIDAK ADA lagi whitelist versionCode. Gate utama
+ * ada di payload: semua 17 simbol hook kunci harus ter-resolve (dlsym →
+ * pattern-generik → pattern-3180). Aplikasi hanya menampilkan versi
+ * terinstall apa adanya + membaca file status payload
+ * (hozinpvz_payload.log) untuk tahu READY vs UNSUPPORTED + simbol mana
+ * yang gagal.
  */
 object InjectorBridge {
 
     const val TARGET_PACKAGE = "com.ea.game.pvzfree_row"
-    const val TARGET_VERSION_CODE = 3180L
-    const val TARGET_VERSION_NAME = "3.18.0"
+    const val TARGET_LIB = "libpvz.so"
 
     private const val INJECTOR_LIB = "libinjector.so"
     private const val PAYLOAD_LIB = "libpayload.so"
     private const val PAYLOAD_TMP = "/data/local/tmp/hozinpvz_payload.so"
+    const val INJECT_LOG = "/data/local/tmp/hozinpvz_inject.log"
+
+    /** Dua lokasi file status payload (payload menulis ke yang pertama bisa). */
+    private const val PAYLOAD_STATUS_TMP = "/data/local/tmp/hozinpvz_payload.log"
+    private const val PAYLOAD_STATUS_CACHE =
+        "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_payload.log"
+
+    /** Hasil inject lengkap dengan diagnosis (stdout injector + file log). */
+    data class InjectResult(val exitCode: Int, val output: String, val diag: String)
+
+    /** Status payload, diparse dari hozinpvz_payload.log. */
+    data class PayloadStatus(
+        val status: String,      // READY | UNSUPPORTED | "" (tak terbaca)
+        val failed: String,      // daftar simbol gagal, "-" bila tak ada
+        val buildId: String,
+        val libSize: String,
+        val menu: Boolean,
+        val raw: String
+    )
 
     fun injectorPath(context: Context): String =
         File(context.applicationInfo.nativeLibraryDir, INJECTOR_LIB).absolutePath
@@ -30,21 +59,81 @@ object InjectorBridge {
     fun payloadPath(context: Context): String =
         File(context.applicationInfo.nativeLibraryDir, PAYLOAD_LIB).absolutePath
 
-    /** Cek PvZ2 terinstall + versionCode cocok (fail-closed di sisi aplikasi). */
+    /**
+     * Cek PvZ2 terinstall + tampilkan versi apa adanya (TANPA penilaian
+     * cocok/tidak — itu urusan payload, bukan aplikasi). Cross-check
+     * dengan PID: proses yang jalan = game terinstall, apa pun kata
+     * PackageManager.
+     */
     fun checkGame(context: Context): String {
-        return try {
-            val pm = context.packageManager
-            val info = pm.getPackageInfo(TARGET_PACKAGE, 0)
+        val pid = findPid(TARGET_PACKAGE)
+        val pidNote = if (pid != null) " (jalan, pid $pid)" else " (belum jalan)"
+        val info = try {
+            context.packageManager.getPackageInfo(TARGET_PACKAGE, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            null
+        }
+        if (info != null) {
             val code = info.longVersionCode
             val name = info.versionName ?: "?"
-            if (code == TARGET_VERSION_CODE) {
-                "PvZ2 terinstall: $name ($code) — COCOK"
-            } else {
-                "PvZ2 terinstall: $name ($code) — TIDAK COCOK, butuh $TARGET_VERSION_NAME ($TARGET_VERSION_CODE)"
-            }
-        } catch (e: PackageManager.NameNotFoundException) {
-            "PvZ2 TIDAK terinstall — install com.ea.game.pvzfree_row 3.18.0 dulu"
+            return "PvZ2 terinstall: $name ($code)$pidNote — didukung bila semua simbol hook ketemu (payload yang memutuskan)"
         }
+        // PackageManager tak bisa melihat paketnya (mis. <queries> hilang):
+        // bila prosesnya jalan, game PASTI terinstall — laporkan begitu.
+        if (pid != null) {
+            return "PvZ2 JALAN (pid $pid) tapi info versi tak terbaca via PackageManager — " +
+                "inject tetap dicoba, payload yang memverifikasi (fail-closed)"
+        }
+        return "PvZ2 TIDAK terinstall — install com.ea.game.pvzfree_row dari Play Store dulu"
+    }
+
+    /** Versi terinstall apa adanya (null bila tak terbaca). */
+    fun installedVersionCode(context: Context): Long? {
+        return try {
+            context.packageManager.getPackageInfo(TARGET_PACKAGE, 0).longVersionCode
+        } catch (e: PackageManager.NameNotFoundException) {
+            null
+        }
+    }
+
+    /** Nama versi terinstall apa adanya (null bila tak terbaca). */
+    fun installedVersionName(context: Context): String? {
+        return try {
+            context.packageManager.getPackageInfo(TARGET_PACKAGE, 0).versionName
+        } catch (e: PackageManager.NameNotFoundException) {
+            null
+        }
+    }
+
+    /** Baca file status payload (dua lokasi, via root). "" bila tak ada. */
+    fun readPayloadStatus(): String {
+        val r = RootShell.exec(
+            "cat '$PAYLOAD_STATUS_TMP' 2>/dev/null || cat '$PAYLOAD_STATUS_CACHE' 2>/dev/null"
+        )
+        return r.output.trim()
+    }
+
+    /** Parse isi file status payload. status "" = file belum ada/tak terbaca. */
+    fun parsePayloadStatus(raw: String): PayloadStatus {
+        if (raw.isEmpty()) return PayloadStatus("", "-", "-", "-", false, "")
+        var status = ""
+        var failed = "-"
+        var buildId = "-"
+        var libSize = "-"
+        var menu = false
+        for (line in raw.lines()) {
+            val (k, v) = line.split("=", limit = 2).let {
+                if (it.size == 2) it[0] to it[1] else it[0] to ""
+            }
+            when (k) {
+                "STATUS" -> status = v
+                "FAILED" -> failed = v
+                "BUILDID" -> buildId = v
+                "LIBSIZE" -> libSize = v
+                "MENU" -> menu = (v == "1")
+            }
+        }
+        return PayloadStatus(status, failed, buildId, libSize, menu, raw)
     }
 
     /**
@@ -56,10 +145,45 @@ object InjectorBridge {
         return result.exitCode == 0
     }
 
+    /** pidof dulu; bila kosong, scan /proc/<pid>/cmdline via su. */
     fun findPid(processName: String): Int? {
-        val result = RootShell.exec("pidof $processName")
-        val pid = result.output.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull()
-        return if (result.exitCode == 0) pid else null
+        val r = RootShell.exec("pidof $processName")
+        val pid = r.output.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull()
+        if (r.exitCode == 0 && pid != null) return pid
+        val safe = processName.replace(".", "[.]")
+        val scan = "for p in /proc/[0-9]*/cmdline; do " +
+            "if grep -a -q '^$safe' \"\$p\" 2>/dev/null; then " +
+            "echo \"\$p\" | cut -d/ -f3; fi; done"
+        val r2 = RootShell.exec(scan)
+        return r2.output.trim().split(Regex("\\s+")).firstOrNull()?.toIntOrNull()
+    }
+
+    /** Apakah lib sudah termuat di proses game (poll /proc/<pid>/maps). */
+    fun isLibLoaded(pid: Int, libName: String): Boolean {
+        val r = RootShell.exec("grep -q '$libName' /proc/$pid/maps")
+        return r.exitCode == 0
+    }
+
+    /**
+     * Luncurkan game. Utama: launch intent PackageManager (butuh <queries>
+     * — sudah ada di manifest v1.1). Cadangan: monkey via su (tak butuh
+     * nama activity).
+     */
+    fun launchGame(context: Context): Boolean {
+        try {
+            val intent = context.packageManager.getLaunchIntentForPackage(TARGET_PACKAGE)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                return true
+            }
+        } catch (e: Exception) {
+            // jatuh ke monkey di bawah
+        }
+        val r = RootShell.exec(
+            "monkey -p $TARGET_PACKAGE -c android.intent.category.LAUNCHER 1"
+        )
+        return r.exitCode == 0
     }
 
     /** Salin payload ke /data/local/tmp agar proses game bisa dlopen. */
@@ -69,12 +193,33 @@ object InjectorBridge {
         return if (r.exitCode == 0) PAYLOAD_TMP else null
     }
 
-    fun inject(context: Context, pid: Int): RootShell.Result {
+    /** Inject + kumpulkan diagnosis (stdout; bila kosong, baca file log). */
+    fun inject(context: Context, pid: Int): InjectResult {
         ensureExecutable(context)
         val staged = stagePayload(context)
         // Fallback: coba path asli bila staging gagal (mis. /data/local/tmp
         // tak bisa ditulis) — injector yang akan membuktikan bisa/tidak.
         val payload = staged ?: payloadPath(context)
-        return RootShell.exec("${injectorPath(context)} $pid $payload")
+        val r = RootShell.exec("${injectorPath(context)} $pid $payload")
+        var diag = r.output.trim()
+        if (diag.isEmpty()) {
+            val log = RootShell.exec("cat '$INJECT_LOG' 2>/dev/null")
+            diag = log.output.trim()
+        }
+        return InjectResult(r.exitCode, r.output, diag)
+    }
+
+    /** Arti exit code injector (v1.1) dalam bahasa manusia. */
+    fun failureReason(exitCode: Int): String = when (exitCode) {
+        0 -> "OK"
+        2 -> "argumen injector salah (bug aplikasi)"
+        3 -> "libdl/libc tidak ketemu di proses injector sendiri"
+        4 -> "ptrace attach ditolak — root tidak aktif / SELinux menolak"
+        5 -> "libc/libdl tidak ketemu di proses game (layout maps aneh)"
+        6 -> "alokasi memori di proses game gagal"
+        7 -> "tulis path payload ke memori game gagal"
+        8 -> "panggilan dlopen di game tidak selesai (game hang/crash?)"
+        9 -> "dlopen payload ditolak — linker namespace / file tak terbaca"
+        else -> "gagal tak dikenal (exit=$exitCode)"
     }
 }

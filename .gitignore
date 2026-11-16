@@ -1,5 +1,6 @@
 # Android
 build/
+.cxx/
 .gradle/
 local.properties
 debug.keystore

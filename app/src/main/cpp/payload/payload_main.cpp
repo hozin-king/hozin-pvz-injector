@@ -1,12 +1,19 @@
-// payload_main.cpp — Hozin PvZ Injector v1.0 (PvZ2 3.18.0 / 3180).
+// payload_main.cpp — Hozin PvZ Injector v1.1 (agnostik versi).
 //
 // Arsitektur (dari AUDIT-INJECTOR.md): payload di-dlopen ke proses game
 // oleh injector root (ptrace + dlopen, pola RootInjector generik), lalu:
-//   1. verifikasi target (package + libpvz.so + BuildID) — GAGAL = keluar
-//      diam-diam, tanpa menu, tanpa hook setengah jalan.
-//   2. resolve alamat hook: dlsym() nama mangled dulu; bila gagal,
-//      pattern-scan (scan.h) sebagai cadangan; bila tetap gagal, fitur
-//      itu TIDAK ADA di menu (bukan toggle palsu).
+//   1. verifikasi target MINIMAL: package benar + libpvz.so termuat.
+//      BuildID + ukuran lib HANYA dicatat (log + file status), BUKAN
+//      gate — BuildID berubah tiap update game (3180 -> 3190 sudah
+//      terjadi di HP user) dan tidak boleh jadi syarat jalan.
+//   2. GATE UTAMA = semua 17 simbol hook kunci berhasil di-resolve:
+//      dlsym() nama mangled dulu; bila gagal, pattern-scan generik,
+//      lalu pattern-scan per-versi (3180). Bila SATU saja gagal -> init
+//      BATAL total (tanpa hook setengah jalan) + file status menulis
+//      UNSUPPORTED + daftar simbol yang gagal, supaya UI bisa bilang
+//      jelas: "versi X (code Y) belum didukung — simbol Z tidak ditemukan".
+//      "Kebal update" = tahan update minor selama signature C++ fungsi
+//      inti tak berubah — BUKAN jaminan mutlak selamanya.
 //   3. pasang hook (Dobby) + menu ImGui native di dalam proses game
 //      (hook eglSwapBuffers; input dari hook InputConsumer::consume).
 //   4. gate mode: hook HANYA berpengaruh di Adventure (LawnApp::
@@ -19,9 +26,11 @@
 // dari v1.0 — fungsi damage tanaman yang persis belum terbukti dari
 // simbol; butuh probe runtime sebelum dibuat (bukan ditebak).
 //
-// Target: com.ea.game.pvzfree_row 3.18.0 (3180), libpvz.so BuildID
-// 8e40bdc91b1c112b29b4b4b587a04159. TIDAK menyentuh Java/Dex, Nimble,
-// Billing, atau lisensi.
+// Target: com.ea.game.pvzfree_row, versi APAPUN yang simbolnya lengkap
+// (terverifikasi dari dump: 3.18.0 / 3180; 3.19.0 / 3190 — dump belum
+// tersedia di mirror publik 16 Nov 2026, verifikasi lewat log payload
+// di HP saat tes POCO). TIDAK menyentuh Java/Dex, Nimble, Billing,
+// atau lisensi.
 
 #include "payload.h"
 
@@ -54,9 +63,63 @@
 // ------------------------------------------------------------------ target
 
 static const char* kTargetPackage = "com.ea.game.pvzfree_row";
-static const uint64_t kExpectedLibSize = 50117680ULL;
-// BuildID libpvz.so 3.18.0 (20 byte, hex lowercase).
-static const char* kExpectedBuildIdHex = "8e40bdc91b1c112b29b4b4b587a04159";
+
+// File status payload — dibaca aplikasi injector (via root) untuk layar
+// diagnosis. /data/local/tmp tidak selalu bisa ditulis dari proses game
+// (UID game), jadi ada fallback ke cache dir game sendiri.
+static const char* kStatusPathTmp =
+    "/data/local/tmp/hozinpvz_payload.log";
+static const char* kStatusPathCache =
+    "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_payload.log";
+
+// Hasil resolusi per simbol (untuk file status + logcat).
+// g_failed: daftar nama simbol yang gagal, dipisah koma ("" bila tak ada).
+// g_resolveLog: satu baris per simbol: "Nama: dlsym|pattern-generic|
+// pattern-3180|GAGAL @ 0x...".
+static char g_buildIdHex[41] = {0};
+static uint64_t g_libSize = 0;
+static char g_failed[512] = {0};
+static char g_resolveLog[4096] = {0};
+static char g_verLine[160] = {0};
+
+// Tulis file status (best-effort, dua lokasi). Format baris kunci=nilai:
+//   STATUS=READY|UNSUPPORTED
+//   FAILED=<daftar simbol gagal, dipisah koma, atau "-">
+//   BUILDID=<hex 40 karakter atau "-">
+//   LIBSIZE=<byte>
+//   MENU=1|0
+//   RESOLVE=<baris-baris g_resolveLog, dipisah ';'>
+static void write_status(const char* status, int menu_ready) {
+    char body[8192];
+    std::snprintf(body, sizeof(body),
+                  "STATUS=%s\nFAILED=%s\nBUILDID=%s\nLIBSIZE=%llu\nMENU=%d\n"
+                  "RESOLVE=%s\n",
+                  status, g_failed[0] ? g_failed : "-",
+                  g_buildIdHex[0] ? g_buildIdHex : "-",
+                  (unsigned long long)g_libSize, menu_ready, g_resolveLog);
+    const char* paths[2] = {kStatusPathTmp, kStatusPathCache};
+    for (int i = 0; i < 2; i++) {
+        FILE* f = std::fopen(paths[i], "w");
+        if (f) {
+            std::fputs(body, f);
+            std::fclose(f);
+            return;
+        }
+    }
+    LOGE("file status payload tak bisa ditulis di kedua lokasi");
+}
+
+static void note_failed(const char* name) {
+    if (g_failed[0]) std::strncat(g_failed, ",", sizeof(g_failed) - std::strlen(g_failed) - 1);
+    std::strncat(g_failed, name, sizeof(g_failed) - std::strlen(g_failed) - 1);
+}
+
+static void note_resolve(const char* name, const char* how, void* addr) {
+    char line[160];
+    std::snprintf(line, sizeof(line), "%s: %s @ %p; ", name, how, addr);
+    std::strncat(g_resolveLog, line,
+                 sizeof(g_resolveLog) - std::strlen(g_resolveLog) - 1);
+}
 
 // Nama mangled (salin persis dari REA — .dynsym libpvz.so).
 static const char* kSymBoardCtor   = "_ZN5BoardC1EP7LawnApp";
@@ -212,9 +275,11 @@ static bool find_lib_path() {
     return ok;
 }
 
-// Baca .note.gnu.build-id dari file .so di disk, bandingkan dengan yang
-// diaudit. Return false bila file tak terbaca / BuildID beda.
-static bool check_build_id() {
+// Baca .note.gnu.build-id dari file .so di disk ke g_buildIdHex.
+// LOG-ONLY (v1.1): BuildID berubah tiap update game, jadi TIDAK PERNAH
+// jadi syarat jalan — hanya dicatat untuk diagnosis.
+// Return false bila file tak terbaca / BuildID tak ketemu.
+static bool read_build_id() {
     if (!g_libPath[0]) return false;
     FILE* f = std::fopen(g_libPath, "rb");
     if (!f) return false;
@@ -254,12 +319,12 @@ static bool check_build_id() {
                 uint8_t id[20];
                 std::fseek(f, (long)desc_off, SEEK_SET);
                 if (std::fread(id, 1, 20, f) == 20) {
-                    char hex[41];
                     for (int b = 0; b < 20; b++)
-                        std::snprintf(hex + b * 2, 3, "%02x", id[b]);
-                    hex[40] = '\0';
-                    ok = (std::strcmp(hex, kExpectedBuildIdHex) == 0);
-                    LOGI("BuildID libpvz.so: %s (expected %s)", hex, kExpectedBuildIdHex);
+                        std::snprintf(g_buildIdHex + b * 2, 3, "%02x", id[b]);
+                    g_buildIdHex[40] = '\0';
+                    ok = true;
+                    LOGI("BuildID libpvz.so: %s (log-only, bukan gate)",
+                         g_buildIdHex);
                 }
                 break;
             }
@@ -275,6 +340,8 @@ static bool verify_target() {
     if (!read_cmdline_package(pkg, sizeof(pkg)) ||
         std::strcmp(pkg, kTargetPackage) != 0) {
         LOGE("package bukan target (%s) — keluar diam-diam", pkg);
+        note_failed("verify:package");
+        write_status("UNSUPPORTED", 0);
         return false;
     }
     // Tunggu libpvz.so termuat (inject bisa terjadi sebelum engine start).
@@ -284,44 +351,66 @@ static bool verify_target() {
     }
     if (g_libBase == 0 || g_execBase == 0 || g_execSize == 0) {
         LOGE("libpvz.so tidak termuat — keluar diam-diam");
+        note_failed("verify:libpvz-not-loaded");
+        write_status("UNSUPPORTED", 0);
         return false;
     }
     if (!find_lib_path()) {
         LOGE("path libpvz.so tidak ketemu di maps");
+        note_failed("verify:lib-path");
+        write_status("UNSUPPORTED", 0);
         return false;
     }
+    // Ukuran + BuildID HANYA dicatat (log-only v1.1) — bukan gate.
     struct stat st;
-    if (stat(g_libPath, &st) != 0 || (uint64_t)st.st_size != kExpectedLibSize) {
-        LOGE("ukuran libpvz.so tidak cocok (%lld) — keluar diam-diam",
-             (long long)(st.st_size));
-        return false;
-    }
-    if (!check_build_id()) {
-        LOGE("BuildID libpvz.so tidak cocok — keluar diam-diam");
-        return false;
-    }
-    LOGI("target terverifikasi: %s, libpvz.so base=0x%lx exec=0x%lx+%zu",
-         pkg, g_libBase, g_execBase, g_execSize);
+    if (stat(g_libPath, &st) == 0) g_libSize = (uint64_t)st.st_size;
+    read_build_id();
+    std::snprintf(g_verLine, sizeof(g_verLine),
+                  "libpvz.so %llu B, BuildID %s",
+                  (unsigned long long)g_libSize,
+                  g_buildIdHex[0] ? g_buildIdHex : "-");
+    LOGI("target terverifikasi: %s, libpvz.so base=0x%lx exec=0x%lx+%zu size=%llu buildid=%s",
+         pkg, g_libBase, g_execBase, g_execSize,
+         (unsigned long long)g_libSize,
+         g_buildIdHex[0] ? g_buildIdHex : "-");
     return true;
 }
 
 // ------------------------------------------------------------- resolver
 
-// dlsym dulu; bila gagal, pattern-scan (cadangan). Return nullptr bila
-// keduanya gagal — pemanggil yang memutuskan (fitur hilang, bukan nekat).
+// dlsym dulu; bila gagal, pattern-scan generik; bila gagal, pattern-scan
+// per-versi (3180). Return nullptr bila ketiganya gagal — pemanggil yang
+// memutuskan (init BATAL total bila satu simbol kunci gagal).
 static void* resolve_fn(const char* mangled, const char* pattern_name) {
     void* addr = dlsym(RTLD_DEFAULT, mangled);
     if (addr) {
         LOGI("resolve %s via dlsym: %p", pattern_name, addr);
+        note_resolve(pattern_name, "dlsym", addr);
         return addr;
     }
-    const PvzPattern* pat = pvz_find_pattern(pattern_name);
+    const PvzPattern* pat = pvz_find_pattern_generic(pattern_name);
     if (pat && g_execBase != 0) {
         addr = pvz_scan_pattern(g_execBase, g_execSize, *pat);
-        if (addr) LOGI("resolve %s via pattern-scan: %p", pattern_name, addr);
+        if (addr) {
+            LOGI("resolve %s via pattern-generic: %p", pattern_name, addr);
+            note_resolve(pattern_name, "pattern-generic", addr);
+            return addr;
+        }
     }
-    if (!addr) LOGE("resolve %s GAGAL (dlsym + pattern)", pattern_name);
-    return addr;
+    pat = pvz_find_pattern_3180(pattern_name);
+    if (pat && g_execBase != 0) {
+        addr = pvz_scan_pattern(g_execBase, g_execSize, *pat);
+        if (addr) {
+            LOGI("resolve %s via pattern-3180: %p", pattern_name, addr);
+            note_resolve(pattern_name, "pattern-3180", addr);
+            return addr;
+        }
+    }
+    LOGE("resolve %s GAGAL (dlsym + pattern-generic + pattern-3180)",
+         pattern_name);
+    note_resolve(pattern_name, "GAGAL", nullptr);
+    note_failed(pattern_name);
+    return nullptr;
 }
 
 static bool hook_one(void* addr, void* repl, void** orig_out, const char* name) {
@@ -383,11 +472,12 @@ static void hook_init_mowers(void* thiz) {
 static void draw_menu() {
     ImGui::SetNextWindowPos(ImVec2(30, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Hozin PvZ Injector v1.0", nullptr)) {
+    if (!ImGui::Begin("Hozin PvZ Injector v1.1", nullptr)) {
         ImGui::End();
         return;
     }
-    ImGui::Text("PvZ2 3.18.0 (3180) — target terverifikasi");
+    ImGui::Text("Hozin PvZ Injector v1.1 — target terverifikasi (simbol 17/17)");
+    ImGui::TextDisabled("%s", g_verLine);
     bool gate = gate_open();
     if (gate)
         ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
@@ -441,7 +531,7 @@ static void draw_menu() {
     }
     ImGui::Separator();
     ImGui::TextWrapped("Solo/offline saja. Sentuhan pada menu juga diteruskan "
-                       "ke game — pause dulu sebelum ubah toggle. v1.0 tanpa "
+                       "ke game — pause dulu sebelum ubah toggle. v1.1 tanpa "
                        "tanaman kebal / tanpa-cooldown (belum terbukti, "
                        "butuh probe runtime).");
     ImGui::End();
@@ -543,74 +633,88 @@ static void install_input_hook() {
 static void* init_thread(void*) {
     if (!verify_target()) return nullptr;
 
-    // --- resolve gate dulu: tanpa gate, fitur TIDAK BOLEH hidup ---
-    g_fnIsAdventure = (LawnAppBoolFn)resolve_fn(kSymIsAdventure, "IsAdventureMode");
-    g_fnIsAppLoaded = (LawnAppBoolFn)resolve_fn(kSymIsAppLoaded, "IsAppLoaded");
-    g_fnIsChallenge = (LawnAppBoolFn)resolve_fn(kSymIsChallenge, "IsChallengeMode");
-    g_fnIsPuzzle    = (LawnAppBoolFn)resolve_fn(kSymIsPuzzle, "IsPuzzleMode");
-    g_fnIsSurvival  = (LawnAppBoolFn)resolve_fn(kSymIsSurvival, "IsSurvivalMode");
-    g_fnIsLastStand = (LawnAppBoolFn)resolve_fn(kSymIsLastStand, "IsLastStandMode");
-    g_fnIsIZombie   = (LawnAppBoolFn)resolve_fn(kSymIsIZombie, "IsIZombieLevel");
-    g_fnCanPinata   = (LawnAppBoolFn)resolve_fn(kSymCanPinata, "CanDoPinataMode");
-    g_gateFnsOk = g_fnIsAdventure && g_fnIsAppLoaded && g_fnIsChallenge &&
-                  g_fnIsPuzzle && g_fnIsSurvival && g_fnIsLastStand &&
-                  g_fnIsIZombie && g_fnCanPinata;
-    if (!g_gateFnsOk)
-        LOGE("fungsi gate tidak lengkap — mod nonaktif permanen (menu status saja)");
+    // --- GATE UTAMA v1.1: resolve SEMUA 17 simbol kunci dulu. Bila SATU
+    // saja gagal -> init BATAL total, tanpa hook setengah jalan, dan file
+    // status menulis UNSUPPORTED + daftar simbol yang gagal. ---
+    void* aIsAdventure = resolve_fn(kSymIsAdventure, "IsAdventureMode");
+    void* aIsAppLoaded = resolve_fn(kSymIsAppLoaded, "IsAppLoaded");
+    void* aIsChallenge = resolve_fn(kSymIsChallenge, "IsChallengeMode");
+    void* aIsPuzzle    = resolve_fn(kSymIsPuzzle, "IsPuzzleMode");
+    void* aIsSurvival  = resolve_fn(kSymIsSurvival, "IsSurvivalMode");
+    void* aIsLastStand = resolve_fn(kSymIsLastStand, "IsLastStandMode");
+    void* aIsIZombie   = resolve_fn(kSymIsIZombie, "IsIZombieLevel");
+    void* aCanPinata   = resolve_fn(kSymCanPinata, "CanDoPinataMode");
+    void* aTakeSun     = resolve_fn(kSymTakeSun, "TakeSunMoney");
+    void* aCanTakeSun  = resolve_fn(kSymCanTakeSun, "CanTakeSunMoney");
+    void* aZombieDmg   = resolve_fn(kSymZombieDmg, "ZombieTakeDamage");
+    void* aPlantCost   = resolve_fn(kSymPlantCost, "GetCurrentPlantCost");
+    void* aInitMowers  = resolve_fn(kSymInitMowers, "InitLawnMowers");
+    void* aSuperMower  = resolve_fn(kSymSuperMower, "SetSuperMowerMode");
+    void* aAddSun      = resolve_fn(kSymAddSun, "AddSunMoney");
+    void* aBoardCtor   = resolve_fn(kSymBoardCtor, "BoardCtor");
+    void* aStartLevel  = resolve_fn(kSymStartLevel, "StartLevel");
 
-    // --- resolve + hook fitur (per fitur; yang gagal = hilang dari menu) ---
-    void* a = resolve_fn(kSymTakeSun, "TakeSunMoney");
-    void* b = resolve_fn(kSymCanTakeSun, "CanTakeSunMoney");
-    if (g_gateFnsOk && a && b) {
+    if (g_failed[0]) {
+        LOGE("simbol kunci tidak lengkap (%s) — versi game ini belum "
+             "didukung, init BATAL tanpa hook", g_failed);
+        write_status("UNSUPPORTED", 0);
+        return nullptr;
+    }
+    g_fnIsAdventure = (LawnAppBoolFn)aIsAdventure;
+    g_fnIsAppLoaded = (LawnAppBoolFn)aIsAppLoaded;
+    g_fnIsChallenge = (LawnAppBoolFn)aIsChallenge;
+    g_fnIsPuzzle    = (LawnAppBoolFn)aIsPuzzle;
+    g_fnIsSurvival  = (LawnAppBoolFn)aIsSurvival;
+    g_fnIsLastStand = (LawnAppBoolFn)aIsLastStand;
+    g_fnIsIZombie   = (LawnAppBoolFn)aIsIZombie;
+    g_fnCanPinata   = (LawnAppBoolFn)aCanPinata;
+    g_gateFnsOk = true;
+
+    // --- hook fitur (semua alamat sudah terbukti ada) ---
+    {
         void* o1 = nullptr; void* o2 = nullptr;
-        bool h1 = hook_one(a, (void*)hook_take_sun, &o1, "TakeSunMoney");
-        bool h2 = hook_one(b, (void*)hook_can_take_sun, &o2, "CanTakeSunMoney");
+        bool h1 = hook_one(aTakeSun, (void*)hook_take_sun, &o1, "TakeSunMoney");
+        bool h2 = hook_one(aCanTakeSun, (void*)hook_can_take_sun, &o2, "CanTakeSunMoney");
         if (h1 && h2) {
             g_origTakeSun = (TakeSunFn)o1;
             g_origCanTakeSun = (CanTakeSunFn)o2;
             g_availSun = true;
         }
     }
-    a = resolve_fn(kSymZombieDmg, "ZombieTakeDamage");
-    if (g_gateFnsOk && a) {
+    {
         void* o = nullptr;
-        if (hook_one(a, (void*)hook_zombie_damage, &o, "Zombie::TakeDamage")) {
+        if (hook_one(aZombieDmg, (void*)hook_zombie_damage, &o, "Zombie::TakeDamage")) {
             g_origZombieDmg = (ZombieDmgFn)o;
             g_availOneHit = true;
         }
     }
-    a = resolve_fn(kSymPlantCost, "GetCurrentPlantCost");
-    if (g_gateFnsOk && a) {
+    {
         void* o = nullptr;
-        if (hook_one(a, (void*)hook_plant_cost, &o, "GetCurrentPlantCost")) {
+        if (hook_one(aPlantCost, (void*)hook_plant_cost, &o, "GetCurrentPlantCost")) {
             g_origPlantCost = (PlantCostFn)o;
             g_availFreePlant = true;
         }
     }
-    a = resolve_fn(kSymInitMowers, "InitLawnMowers");
-    b = resolve_fn(kSymSuperMower, "SetSuperMowerMode");
-    if (g_gateFnsOk && a && b) {
-        g_origSuperMower = (SuperMowerFn)b;  // dipanggil, bukan di-hook
+    g_origSuperMower = (SuperMowerFn)aSuperMower;  // dipanggil, bukan di-hook
+    {
         void* o = nullptr;
-        if (hook_one(a, (void*)hook_init_mowers, &o, "InitLawnMowers")) {
+        if (hook_one(aInitMowers, (void*)hook_init_mowers, &o, "InitLawnMowers")) {
             g_origInitMowers = (InitMowersFn)o;
             g_availMower = true;
         }
     }
-    a = resolve_fn(kSymAddSun, "AddSunMoney");
-    if (a) g_origAddSun = (AddSunFn)a, g_availAddSun = true;
+    g_origAddSun = (AddSunFn)aAddSun;
+    g_availAddSun = true;
 
     // --- tangkap instance: Board ctor (LawnApp*) + StartLevel (Board*) ---
-    a = resolve_fn(kSymBoardCtor, "BoardCtor");
-    if (a) {
+    {
         void* o = nullptr;
-        if (hook_one(a, (void*)hook_board_ctor, &o, "Board::Board"))
+        if (hook_one(aBoardCtor, (void*)hook_board_ctor, &o, "Board::Board"))
             g_origBoardCtor = (BoardCtorFn)o;
     }
-    a = resolve_fn(kSymStartLevel, "StartLevel");
-    if (a) {
+    {
         void* o = nullptr;
-        if (hook_one(a, (void*)hook_start_level, &o, "Board::StartLevel"))
+        if (hook_one(aStartLevel, (void*)hook_start_level, &o, "Board::StartLevel"))
             g_origStartLevel = (StartLevelFn)o;
     }
 
@@ -632,13 +736,14 @@ static void* init_thread(void*) {
     LOGI("payload siap: sun=%d 1hit=%d freeplant=%d mower=%d addsun=%d gate=%d menu=%d",
          g_availSun, g_availOneHit, g_availFreePlant, g_availMower,
          g_availAddSun, g_gateFnsOk, g_menuReady);
+    write_status("READY", g_menuReady ? 1 : 0);
     return nullptr;
 }
 
 }  // namespace
 
 void payload_init() {
-    LOGI("payload_init: Hozin PvZ Injector v1.0 masuk ke proses target");
+    LOGI("payload_init: Hozin PvZ Injector v1.1 masuk ke proses target");
     pthread_t t;
     if (pthread_create(&t, nullptr, init_thread, nullptr) == 0)
         pthread_detach(t);
