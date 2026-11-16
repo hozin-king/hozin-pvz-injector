@@ -1,0 +1,21 @@
+# ninja log v5
+0	17	1794838445791346557	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-mkdir	b9207b95eb9077aa
+0	17	1794838445791346557	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-mkdir	b9207b95eb9077aa
+17	6053	1794838451821346791	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-download	7bfc52397065e862
+17	6053	1794838451821346791	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-download	7bfc52397065e862
+6054	6078	1794838451851346792	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-update	604ec4b43fa100de
+6054	6078	1794838451851346792	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-update	604ec4b43fa100de
+6078	6087	1794838451861346793	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-patch	e9a56f2363117208
+6078	6087	1794838451861346793	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-patch	e9a56f2363117208
+6087	6093	1794838451867346793	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-configure	6517ed8ccc864eae
+6087	6093	1794838451867346793	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-configure	6517ed8ccc864eae
+6094	6099	1794838451873346793	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-build	18b3fa5c724a0b34
+6094	6099	1794838451873346793	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-build	18b3fa5c724a0b34
+6099	6104	1794838451879346793	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-install	198ac01645b3c16e
+6099	6104	1794838451879346793	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-install	198ac01645b3c16e
+6105	6110	1794838451885346793	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-test	762a1715c09b19a0
+6105	6110	1794838451885346793	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-test	762a1715c09b19a0
+6111	6118	1794838451892346794	CMakeFiles/dobby-populate-complete	c45835b129bd5aa
+6111	6118	1794838451892346794	dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-done	c45835b129bd5aa
+6111	6118	1794838451892346794	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/CMakeFiles/dobby-populate-complete	c45835b129bd5aa
+6111	6118	1794838451892346794	/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-subbuild/dobby-populate-prefix/src/dobby-populate-stamp/dobby-populate-done	c45835b129bd5aa

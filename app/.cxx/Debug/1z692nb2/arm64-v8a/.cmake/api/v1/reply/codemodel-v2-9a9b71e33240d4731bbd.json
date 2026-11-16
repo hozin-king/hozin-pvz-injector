@@ -1,0 +1,207 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						3,
+						4,
+						7
+					]
+				},
+				{
+					"build" : "_deps/dobby-build",
+					"childIndexes" : 
+					[
+						2,
+						3,
+						4
+					],
+					"jsonFile" : "directory-_deps.dobby-build-Debug-f1f721fe8c419df404cf.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.5"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				},
+				{
+					"build" : "_deps/dobby-build/external/logging",
+					"jsonFile" : "directory-_deps.dobby-build.external.logging-Debug-ef11f8f9f2507a3b5b13.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.5"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/logging",
+					"targetIndexes" : 
+					[
+						5
+					]
+				},
+				{
+					"build" : "_deps/dobby-build/external/osbase",
+					"jsonFile" : "directory-_deps.dobby-build.external.osbase-Debug-b6cffb434874c36de79c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.5"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/osbase",
+					"targetIndexes" : 
+					[
+						6
+					]
+				},
+				{
+					"build" : "_deps/dobby-build/builtin-plugin/SymbolResolver",
+					"jsonFile" : "directory-_deps.dobby-build.builtin-plugin.SymbolResolver-Debug-a86f2586d0d04802c989.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.5"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/builtin-plugin/SymbolResolver",
+					"targetIndexes" : 
+					[
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "HozinPvZInjector",
+					"targetIndexes" : 
+					[
+						3,
+						4,
+						7
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1,
+						2,
+						3,
+						4
+					],
+					"name" : "Dobby",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						5,
+						6
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 1,
+					"id" : "dobby::@6545659c670079bcb012",
+					"jsonFile" : "target-dobby-Debug-79bdceebc77431bbe15a.json",
+					"name" : "dobby",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "dobby_static::@6545659c670079bcb012",
+					"jsonFile" : "target-dobby_static-Debug-29c55522a83e9f6415e3.json",
+					"name" : "dobby_static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 4,
+					"id" : "dobby_symbol_resolver::@1fafcae63ccfe7d4dd70",
+					"jsonFile" : "target-dobby_symbol_resolver-Debug-749f51ccbb2bb2f85494.json",
+					"name" : "dobby_symbol_resolver",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "imgui::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-imgui-Debug-154ddd0da036f7db5838.json",
+					"name" : "imgui",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "libinjector::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-libinjector-Debug-56212ea153a52f9fbafb.json",
+					"name" : "libinjector",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "logging::@cba9e4b94e1bd2b2df68",
+					"jsonFile" : "target-logging-Debug-1508202a80e05f6b406e.json",
+					"name" : "logging",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "osbase::@e09ae2cd78420703fa22",
+					"jsonFile" : "target-osbase-Debug-30a563d1ddfe8b6d4d22.json",
+					"name" : "osbase",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "payload::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-payload-Debug-caa25bbf9ede9dedec7f.json",
+					"name" : "payload",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a",
+		"source" : "/home/hatch/workspace/hozin-pvz-injector/app/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

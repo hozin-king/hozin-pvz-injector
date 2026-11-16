@@ -1,0 +1,3 @@
+repository='external project URL'
+module='https://github.com/jmpews/Dobby/archive/5dfc8546954ce3b3198132ab13fddb89ee92cdd7.zip'
+tag=''

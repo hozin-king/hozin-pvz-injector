@@ -1,0 +1,89 @@
+{
+  "buildFiles": [
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/builtin-plugin/SymbolResolver/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/logging/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/osbase/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/hatch/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/hatch/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "dobby::@6545659c670079bcb012": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "dobby",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libdobby.so",
+      "runtimeFiles": []
+    },
+    "dobby_static::@6545659c670079bcb012": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "dobby_static",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/libdobby.a"
+    },
+    "dobby_symbol_resolver::@1fafcae63ccfe7d4dd70": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "dobby_symbol_resolver",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/builtin-plugin/SymbolResolver/libdobby_symbol_resolver.a"
+    },
+    "imgui::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "imgui",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/libimgui.a"
+    },
+    "libinjector::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "libinjector",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libinjector.so",
+      "runtimeFiles": []
+    },
+    "logging::@cba9e4b94e1bd2b2df68": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "logging",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/external/logging/liblogging.a"
+    },
+    "osbase::@e09ae2cd78420703fa22": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "osbase",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/external/osbase/libosbase.a"
+    },
+    "payload::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "payload",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libpayload.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/home/hatch/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/home/hatch/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [
+    "c"
+  ],
+  "cppFileExtensions": [
+    "cc",
+    "cpp"
+  ]
+}

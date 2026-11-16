@@ -1,0 +1,7 @@
+# Android
+build/
+.gradle/
+local.properties
+debug.keystore
+*.iml
+.DS_Store

@@ -1,0 +1,73 @@
+{
+  "buildFiles": [
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/builtin-plugin/SymbolResolver/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/logging/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-src/external/osbase/CMakeLists.txt",
+    "/home/hatch/workspace/hozin-pvz-injector/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/hatch/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/hatch/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "logging::@cba9e4b94e1bd2b2df68": {
+      "artifactName": "logging",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/external/logging/liblogging.a",
+      "runtimeFiles": []
+    },
+    "osbase::@e09ae2cd78420703fa22": {
+      "artifactName": "osbase",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/external/osbase/libosbase.a",
+      "runtimeFiles": []
+    },
+    "dobby_static::@6545659c670079bcb012": {
+      "artifactName": "dobby_static",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/libdobby.a",
+      "runtimeFiles": []
+    },
+    "imgui::@6890427a1f51a3e7e1df": {
+      "artifactName": "imgui",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/libimgui.a",
+      "runtimeFiles": []
+    },
+    "dobby::@6545659c670079bcb012": {
+      "artifactName": "dobby",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libdobby.so",
+      "runtimeFiles": []
+    },
+    "dobby_symbol_resolver::@1fafcae63ccfe7d4dd70": {
+      "artifactName": "dobby_symbol_resolver",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/.cxx/Debug/1z692nb2/arm64-v8a/_deps/dobby-build/builtin-plugin/SymbolResolver/libdobby_symbol_resolver.a",
+      "runtimeFiles": []
+    },
+    "libinjector::@6890427a1f51a3e7e1df": {
+      "artifactName": "libinjector",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libinjector.so",
+      "runtimeFiles": []
+    },
+    "payload::@6890427a1f51a3e7e1df": {
+      "artifactName": "payload",
+      "abi": "arm64-v8a",
+      "output": "/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libpayload.so",
+      "runtimeFiles": []
+    }
+  }
+}
