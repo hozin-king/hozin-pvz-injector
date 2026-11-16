@@ -8,6 +8,11 @@ import java.io.File
 /**
  * Hozin PvZ Injector v1.1 — jembatan Kotlin ↔ native injector.
  *
+ * v1.2: staging payload PINDAH ke cache game sendiri (app_data_file) —
+ * tes POCO v1.1: dlopen NULL dari /data/local/tmp (shell_data_file,
+ * untrusted_app tak bisa baca). Injector v1.2 menangkap dlerror() +
+ * fallback android_dlopen_ext via fd.
+ *
  * Pelajaran v1.0 (tes POCO 21:53):
  * - "PvZ2 TIDAK terinstall" padahal PID game ketemu. Akar: manifest v1.0
  *   tanpa <queries> → di Android 11+ getPackageInfo() untuk aplikasi lain
@@ -33,6 +38,18 @@ object InjectorBridge {
     private const val INJECTOR_LIB = "libinjector.so"
     private const val PAYLOAD_LIB = "libpayload.so"
     private const val PAYLOAD_TMP = "/data/local/tmp/hozinpvz_payload.so"
+
+    /**
+     * Lokasi UTAMA payload (v1.2): direktori cache game sendiri.
+     * Bukti tes POCO v1.1: dlopen NULL dari /data/local/tmp — file di sana
+     * berkonteks shell_data_file dan proses game (untrusted_app) TIDAK
+     * bisa membacanya (SELinux). File di cache game berkonteks
+     * app_data_file milik game sendiri → bisa dibaca/di-dlopen.
+     */
+    private const val PAYLOAD_GAME =
+        "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_payload.so"
+    private const val GAME_CACHE_DIR = "/data/data/com.ea.game.pvzfree_row/cache"
+    private const val GAME_DATA_DIR = "/data/data/com.ea.game.pvzfree_row"
     const val INJECT_LOG = "/data/local/tmp/hozinpvz_inject.log"
 
     /** Dua lokasi file status payload (payload menulis ke yang pertama bisa). */
@@ -186,9 +203,27 @@ object InjectorBridge {
         return r.exitCode == 0
     }
 
-    /** Salin payload ke /data/local/tmp agar proses game bisa dlopen. */
+    /**
+     * Salin payload ke lokasi yang BISA di-dlopen proses game.
+     * v1.2 — utama: cache game sendiri. File disalin root lalu disamakan
+     * owner (UID game) + konteks SELinux dengan direktori cache game
+     * (chcon --reference, termasuk kategori MLS) + chmod 755. Bila gagal
+     * (mis. direktori game tak bisa ditulis), cadangan: /data/local/tmp
+     * seperti v1.1 — injector v1.2 menangkap dlerror + mencoba
+     * android_dlopen_ext bila jalur ini yang dipakai.
+     */
     private fun stagePayload(context: Context): String? {
         val src = payloadPath(context)
+        val gameStage = RootShell.exec(
+            "D='$GAME_CACHE_DIR'; " +
+            "mkdir -p \"\$D\" && cp '$src' '$PAYLOAD_GAME' && " +
+            "U=\$(stat -c %u '$GAME_DATA_DIR' 2>/dev/null); " +
+            "if [ -n \"\$U\" ]; then chown \"\$U\" '$PAYLOAD_GAME' 2>/dev/null; fi; " +
+            "chmod 755 '$PAYLOAD_GAME' && " +
+            "chcon --reference=\"\$D\" '$PAYLOAD_GAME' 2>/dev/null; " +
+            "ls -l '$PAYLOAD_GAME'"
+        )
+        if (gameStage.exitCode == 0) return PAYLOAD_GAME
         val r = RootShell.exec("cp '$src' '$PAYLOAD_TMP' && chmod 755 '$PAYLOAD_TMP'")
         return if (r.exitCode == 0) PAYLOAD_TMP else null
     }
@@ -206,6 +241,9 @@ object InjectorBridge {
             val log = RootShell.exec("cat '$INJECT_LOG' 2>/dev/null")
             diag = log.output.trim()
         }
+        // Catat jalur payload yang dipakai — penting saat dlopen gagal
+        // (bedakan cache game vs /data/local/tmp di diagnosis).
+        if (diag.isNotEmpty()) diag = "payload path dipakai: $payload\n$diag"
         return InjectResult(r.exitCode, r.output, diag)
     }
 
@@ -219,7 +257,7 @@ object InjectorBridge {
         6 -> "alokasi memori di proses game gagal"
         7 -> "tulis path payload ke memori game gagal"
         8 -> "panggilan dlopen di game tidak selesai (game hang/crash?)"
-        9 -> "dlopen payload ditolak — linker namespace / file tak terbaca"
+        9 -> "dlopen payload ditolak — baca baris dlerror di diagnosis (alasan linker yang sebenarnya)"
         else -> "gagal tak dikenal (exit=$exitCode)"
     }
 }

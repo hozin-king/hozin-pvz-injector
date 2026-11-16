@@ -94,3 +94,7 @@
 2402	4429	1794838535806250491	_deps/dobby-build/CMakeFiles/dobby_static.dir/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc.o	c123981cf71b60d6
 4429	4621	1794838536003774577	_deps/dobby-build/libdobby.a	42386a6332f5da2
 4621	4991	1794838536330350071	/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libpayload.so	6f4f4a0200bcd806
+199	1374	1794843607022852056	CMakeFiles/payload.dir/payload/payload_main.cpp.o	8befb1db97a7f034
+1381	1972	1794843607634852053	/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libpayload.so	6f4f4a0200bcd806
+189	2167	1794843660472301854	CMakeFiles/libinjector.dir/injector/injector_main.cpp.o	13a89fec73facba7
+2175	2586	1794843660900851843	/home/hatch/workspace/hozin-pvz-injector/app/build/intermediates/cxx/Debug/1z692nb2/obj/arm64-v8a/libinjector.so	50dee4582b734609

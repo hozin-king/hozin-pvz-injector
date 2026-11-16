@@ -9,7 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.hozinking.pvzinjector.databinding.ActivityMainBinding
 
 /**
- * Hozin PvZ Injector v1.1 — launcher root untuk Plants vs Zombies 2 Free
+ * Hozin PvZ Injector v1.2 — launcher root untuk Plants vs Zombies 2 Free
  * (com.ea.game.pvzfree_row). Game TIDAK dibundel — user install sendiri
  * dari Play Store / APKPure.
  *
@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
     private fun runAutoInject() {
         autoRunning = true
         try {
-            log("== Inject v1.1 — alur otomatis ==")
+            log("== Inject v1.2 — alur otomatis ==")
             FloatingOverlay.show(this, "⏳ Hozin PvZ: memulai…")
 
             // 1. Root.
@@ -149,6 +149,12 @@ class MainActivity : AppCompatActivity() {
             val result = InjectorBridge.inject(this, pid)
             if (result.diag.isNotEmpty()) log(result.diag)
             log("injector exit=${result.exitCode}")
+            // Cek game masih hidup (v1.2): membuktikan/membantah klaim
+            // "crash" dari data, bukan tebakan. Injector juga mencatat
+            // hal yang sama di diagnosisnya.
+            val pidAfter = InjectorBridge.findPid(InjectorBridge.TARGET_PACKAGE)
+            log(if (pidAfter != null) "game masih jalan setelah inject (pid $pidAfter)"
+                else "game MATI setelah inject — kemungkinan crash saat remote call")
             if (result.exitCode == 0) {
                 // dlopen berhasil — tapi READY/UNSUPPORTED diputuskan
                 // payload (simbol hook). Tunggu file statusnya ±10 dtk.

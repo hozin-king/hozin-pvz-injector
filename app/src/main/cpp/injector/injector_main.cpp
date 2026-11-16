@@ -1,11 +1,15 @@
+#include <android/dlext.h>
 #include <android/log.h>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <string>
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <vector>
 
@@ -78,6 +82,46 @@ bool resolve_remote(int pid, const char* lib_name, uintptr_t offset, uintptr_t& 
     return true;
 }
 
+// Baca string C dari memori proses target (hasil dlerror()). Satu pread
+// 512 byte; cukup untuk pesan linker yang biasanya < 200 karakter.
+bool read_remote_cstr(injector::RemoteProcess& proc, uint64_t addr, std::string& out) {
+    if (addr == 0) return false;
+    char buf[512];
+    if (!proc.read_mem(addr, buf, sizeof(buf))) return false;
+    buf[sizeof(buf) - 1] = '\0';
+    out = buf;
+    return true;
+}
+
+// Panggil dlerror() di dalam proses target dan tulis pesan LENGKAPNYA ke
+// diagnosis. Inilah yang hilang di v1.1 ("namespace?" hanya tebakan):
+// "library X not found" vs "Permission denied" membedakan akar dengan
+// pasti. Mengembalikan false bila dlerror tak tersedia / tak ada pesan.
+bool capture_dlerror(injector::RemoteProcess& proc, uintptr_t remote_dlerror,
+                     const char* tag) {
+    if (remote_dlerror == 0) {
+        diag("%s: dlerror tak tersedia di proses game", tag);
+        return false;
+    }
+    uint64_t err_ptr = 0;
+    std::vector<uint64_t> no_args;
+    if (!proc.call(remote_dlerror, no_args, err_ptr)) {
+        diag("%s: panggilan dlerror tidak selesai", tag);
+        return false;
+    }
+    if (err_ptr == 0) {
+        diag("%s: dlerror kosong (linker tak mencatat error)", tag);
+        return false;
+    }
+    std::string msg;
+    if (!read_remote_cstr(proc, err_ptr, msg) || msg.empty()) {
+        diag("%s: dlerror tak terbaca dari memori game", tag);
+        return false;
+    }
+    diag("%s: %s", tag, msg.c_str());
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -129,6 +173,33 @@ int main(int argc, char** argv) {
     }
     diag("remote mmap=0x%lx remote dlopen=0x%lx", remote_mmap, remote_dlopen);
 
+    // Alamat remote tambahan untuk diagnosis + fallback (v1.2). Semuanya
+    // LENIENT: bila tak ketemu, jalurnya dilewati dengan catatan — jangan
+    // sampai ketiadaan fallback membunuh jalur utama.
+    uintptr_t remote_dlerror = 0, remote_dlopen_ext = 0, remote_open = 0;
+    uintptr_t dlerror_offset = 0, dlopen_ext_offset = 0, open_offset = 0;
+    if (local_offset("libdl.so", reinterpret_cast<void*>(&dlerror), dlerror_offset) &&
+        resolve_remote(pid, "libdl.so", dlerror_offset, remote_dlerror)) {
+        diag("remote dlerror=0x%lx", remote_dlerror);
+    } else {
+        diag("catatan: dlerror tak ter-resolve — alasan dlopen gagal tak bisa ditangkap");
+    }
+    if (local_offset("libdl.so", reinterpret_cast<void*>(&android_dlopen_ext),
+                     dlopen_ext_offset) &&
+        resolve_remote(pid, "libdl.so", dlopen_ext_offset, remote_dlopen_ext)) {
+        diag("remote android_dlopen_ext=0x%lx", remote_dlopen_ext);
+    } else {
+        diag("catatan: android_dlopen_ext tak ter-resolve — fallback fd tidak tersedia");
+    }
+    if (local_offset("libc.so",
+                     reinterpret_cast<void*>(static_cast<int (*)(const char*, int, ...)>(&open)),
+                     open_offset) &&
+        resolve_remote(pid, "libc.so", open_offset, remote_open)) {
+        diag("remote open=0x%lx", remote_open);
+    } else {
+        diag("catatan: open tak ter-resolve — fallback fd tidak tersedia");
+    }
+
     // 1) allocate RW scratch in the target for the payload path string.
     uint64_t scratch = 0;
     std::vector<uint64_t> mmap_args = {
@@ -162,22 +233,78 @@ int main(int argc, char** argv) {
     uint64_t handle = 0;
     std::vector<uint64_t> dlopen_args = {scratch, RTLD_NOW};
     bool called = proc.call(remote_dlopen, dlopen_args, handle);
-    proc.detach();
 
     if (!called) {
         diag("FAIL dlopen call: panggilan dlopen di pid %d tidak selesai", pid);
+        proc.detach();
+        diag("game masih jalan setelah inject: %s",
+             (kill(pid, 0) == 0) ? "ya" : "TIDAK - game mati");
         if (g_logf) std::fclose(g_logf);
         return EXIT_DLOPEN_CALL;
     }
-    if (handle == 0) {
-        diag("FAIL dlopen NULL: payload ditolak linker (namespace?) atau file tak terbaca: %s",
-             payload_path);
+    if (handle != 0) {
+        diag("OK handle=0x%lx", handle);
+        proc.detach();
+        diag("game masih jalan setelah inject: %s",
+             (kill(pid, 0) == 0) ? "ya" : "TIDAK - game mati");
         if (g_logf) std::fclose(g_logf);
-        return EXIT_DLOPEN_NULL;
+        return EXIT_OK;
     }
 
-    diag("OK handle=0x%lx", handle);
-    std::printf("OK handle=0x%lx\n", handle);
+    // dlopen by-path mengembalikan NULL — v1.1 berhenti di sini dengan
+    // tebakan ("namespace?"). v1.2: tangkap dlerror() dulu (alasan linker
+    // yang sebenarnya), lalu coba fallback android_dlopen_ext via file
+    // descriptor: fd dibuka OLEH proses game sendiri (remote open), jadi
+    // pemeriksaan path / namespace linker dilewati.
+    diag("dlopen by-path NULL — tangkap dlerror:");
+    capture_dlerror(proc, remote_dlerror, "dlerror");
+
+    bool ext_ok = false;
+    uint64_t handle2 = 0;
+    if (remote_dlopen_ext != 0 && remote_open != 0) {
+        uint64_t fd = 0;
+        std::vector<uint64_t> open_args = {scratch, O_RDONLY, 0};
+        bool opened = proc.call(remote_open, open_args, fd);
+        if (!opened || static_cast<int64_t>(fd) < 0) {
+            diag("fallback fd: remote open(%s) gagal (fd=%lld) — file tak bisa dibuka proses game",
+                 payload_path, static_cast<long long>(fd));
+        } else {
+            diag("fallback fd: remote open OK fd=%llu",
+                 static_cast<unsigned long long>(fd));
+            android_dlextinfo info{};
+            info.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
+            info.library_fd = static_cast<int>(fd);
+            info.library_fd_offset = 0;
+            // Scratch: path di [0x0, 0x800), dlextinfo di 0x800.
+            if (!proc.write_mem(scratch + 0x800, &info, sizeof(info))) {
+                diag("fallback fd: tulis dlextinfo ke scratch gagal");
+            } else {
+                std::vector<uint64_t> ext_args = {scratch, RTLD_NOW, scratch + 0x800};
+                bool called2 = proc.call(remote_dlopen_ext, ext_args, handle2);
+                if (!called2) {
+                    diag("fallback fd: panggilan android_dlopen_ext tidak selesai");
+                } else if (handle2 != 0) {
+                    diag("OK handle=0x%lx via android_dlopen_ext (fd)", handle2);
+                    ext_ok = true;
+                } else {
+                    diag("android_dlopen_ext juga NULL — tangkap dlerror:");
+                    capture_dlerror(proc, remote_dlerror, "dlerror (ext)");
+                }
+            }
+        }
+    } else {
+        diag("fallback fd dilewati — android_dlopen_ext/open tak ter-resolve");
+    }
+    proc.detach();
+
+    bool alive = (kill(pid, 0) == 0);
+    diag("game masih jalan setelah inject: %s", alive ? "ya" : "TIDAK - game mati");
+    if (ext_ok) {
+        if (g_logf) std::fclose(g_logf);
+        return EXIT_OK;
+    }
+    diag("FAIL dlopen NULL: payload ditolak linker / file tak terbaca: %s (lihat baris dlerror di atas)",
+         payload_path);
     if (g_logf) std::fclose(g_logf);
-    return EXIT_OK;
+    return EXIT_DLOPEN_NULL;
 }
