@@ -9,7 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.hozinking.pvzinjector.databinding.ActivityMainBinding
 
 /**
- * Hozin PvZ Injector v1.2 — launcher root untuk Plants vs Zombies 2 Free
+ * Hozin PvZ Injector v1.3 — launcher root untuk Plants vs Zombies 2 Free
  * (com.ea.game.pvzfree_row). Game TIDAK dibundel — user install sendiri
  * dari Play Store / APKPure.
  *
@@ -19,6 +19,18 @@ import com.hozinking.pvzinjector.databinding.ActivityMainBinding
  *   → inject otomatis. TIDAK ADA lagi langkah manual "buka gamenya dulu".
  *   Logo/status mengambang (FloatingOverlay) muncul begitu proses dimulai
  *   dan tetap tampil apa pun hasilnya — anti gagal.
+ *
+ * v1.3 — mekanisme injector di-port dari Traffic Rider (TR v2.5,
+ * terbukti jalan di HP user): jeda settle 3 dtk setelah libpvz.so
+ * termuat (jangan dlopen saat main thread masih memegang loader lock —
+ * akar hang v1.2), retry dlopen s.d. 3x (cache game → native → cache
+ * game) dengan cek maps antar percobaan, anti-double-load (jangan dlopen
+ * bila payload sudah ter-map), verifikasi alamat dlopen remote di
+ * mapping x-perm libdl.so. Inti mekanisme SAMA dengan TR (ptrace +
+ * remote dlopen, kerangka RootInjector) — yang di-port adalah hardening
+ * lapangan TR. Constructor payload non-blocking + timeout 10 dtk +
+ * retry thread tidur tetap ada dari rencana v1.3 awal. Zygisk DITAHAN
+ * untuk v1.3 (perintah user: pakai punya TR dulu).
  *
  * AGNOSTIK VERSI: aplikasi TIDAK menolak berdasarkan versionCode. Gate
  * ada di payload — semua 17 simbol hook harus ter-resolve. Setelah inject,
@@ -88,7 +100,7 @@ class MainActivity : AppCompatActivity() {
     private fun runAutoInject() {
         autoRunning = true
         try {
-            log("== Inject v1.2 — alur otomatis ==")
+            log("== Inject v1.3 — alur otomatis ==")
             FloatingOverlay.show(this, "⏳ Hozin PvZ: memulai…")
 
             // 1. Root.
@@ -140,6 +152,21 @@ class MainActivity : AppCompatActivity() {
             val libOk = waitForLib(pid, 45)
             if (libOk) {
                 log("libpvz.so termuat")
+                // TR-port (v1.3) — jeda settle 3 dtk, menunggu main thread
+                // game keluar dari rantai dlopen awal (loader lock). Tanpa
+                // ini remote-dlopen bisa mendarat saat main thread masih
+                // memegang linker lock → dlopen bersarang deadlock →
+                // injector + su menggantung, game membeku (bukti TR v2.0/
+                // v2.1). Persis mode gagal PvZ v1.2 (dlopen hang, exit=8).
+                log("jeda settle 3 dtk biar game selesai load (TR-port)…")
+                FloatingOverlay.setStatus("⏳ Hozin PvZ: jeda settle 3 dtk…")
+                Thread.sleep(3000)
+                val pidAlive = InjectorBridge.findPid(InjectorBridge.TARGET_PACKAGE)
+                if (pidAlive != pid) {
+                    log("PID game berubah/mati saat jeda settle — batal")
+                    FloatingOverlay.setStatus("❌ Hozin PvZ: game mati saat jeda")
+                    return
+                }
             } else {
                 log("libpvz.so belum terlihat setelah 45 dtk — inject tetap dicoba (payload menunggu sendiri)")
             }

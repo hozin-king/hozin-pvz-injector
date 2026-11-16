@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <string>
@@ -122,6 +123,111 @@ bool capture_dlerror(injector::RemoteProcess& proc, uintptr_t remote_dlerror,
     return true;
 }
 
+// TR-port (v1.3): cek apakah payload sudah ter-map di proses target.
+// dlopen percobaan sebelumnya bisa selesai TERLAMBAT, setelah timeout —
+// tanpa cek ini, retry = dlopen kedua = constructor kedua = crash.
+bool is_payload_loaded(int pid) {
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char line[1024];
+    bool found = false;
+    while (std::fgets(line, sizeof(line), f)) {
+        if (std::strstr(line, "payload.so")) { found = true; break; }
+    }
+    std::fclose(f);
+    return found;
+}
+
+// TR-port (v1.3): verifikasi alamat remote berada di mapping executable
+// milik modul yang diharapkan SEBELUM dipanggil — jangan panggil alamat
+// sampah. (Pelajaran TR: dlopen hidup di libdl.so, BUKAN libc.so —
+// mencampur modul = alamat salah = SIGSEGV di PC yang dipanggil.)
+bool verify_xmap(int pid, uintptr_t addr, const char* lib_name) {
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char line[1024];
+    bool ok = false;
+    while (std::fgets(line, sizeof(line), f)) {
+        uintptr_t s = 0, e = 0;
+        char perms[5] = {0};
+        char pbuf[512] = {0};
+        int n = std::sscanf(line, "%lx-%lx %4s %*s %*s %*d %511s",
+                            &s, &e, perms, pbuf);
+        if (n < 4 || pbuf[0] == '\0') continue;
+        if (s <= addr && addr < e) {
+            ok = (std::strchr(perms, 'x') != nullptr) &&
+                 (std::strstr(pbuf, lib_name) != nullptr);
+            diag("verify dlopen: %s %s (%s): %s", pbuf, perms, lib_name,
+                 ok ? "OK" : "SALAH");
+            break;
+        }
+    }
+    std::fclose(f);
+    return ok;
+}
+
+// Pilih thread target LAIN yang sedang TIDUR (v1.3). Thread yang tidur
+// di futex/epoll hampir pasti tidak memegang loader lock, jadi remote
+// call dari sana jauh lebih aman daripada dari main thread yang barusan
+// hang. Main thread (tid == pid) tidak pernah dipilih ulang. Return
+// false bila tidak ada kandidat.
+bool pick_sleepy_thread(int pid, int exclude_tid, int& tid_out, std::string& wchan_out) {
+    char task_dir[64];
+    std::snprintf(task_dir, sizeof(task_dir), "/proc/%d/task", pid);
+    DIR* d = opendir(task_dir);
+    if (!d) return false;
+    int best_tid = -1, best_score = -1;
+    std::string best_wchan;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int tid = std::atoi(e->d_name);
+        if (tid == exclude_tid || tid == pid) continue;
+        char stat_path[96];
+        std::snprintf(stat_path, sizeof(stat_path), "/proc/%d/task/%d/stat", pid, tid);
+        FILE* f = std::fopen(stat_path, "r");
+        if (!f) continue;
+        char buf[1024];
+        size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        if (n == 0) continue;
+        buf[n] = '\0';
+        // state = field ke-3, tepat setelah ')' terakhir dari comm.
+        char* rp = std::strrchr(buf, ')');
+        if (!rp || rp[1] == '\0') continue;
+        char state = rp[2];
+        if (state != 'S' && state != 'T') continue;
+        char wchan_path[96];
+        std::snprintf(wchan_path, sizeof(wchan_path), "/proc/%d/task/%d/wchan", pid, tid);
+        std::string wchan;
+        FILE* wf = std::fopen(wchan_path, "r");
+        if (wf) {
+            char wb[128];
+            if (std::fgets(wb, sizeof(wb), wf)) wchan = wb;
+            std::fclose(wf);
+        }
+        int score = 0;
+        if (wchan.find("futex") != std::string::npos) score = 3;
+        else if (wchan.find("epoll") != std::string::npos) score = 3;
+        else if (wchan.find("poll") != std::string::npos) score = 2;
+        else if (state == 'S') score = 1;
+        if (score > best_score) {
+            best_score = score;
+            best_tid = tid;
+            best_wchan = wchan.empty() ? "?" : wchan;
+        }
+    }
+    closedir(d);
+    if (best_tid < 0) return false;
+    tid_out = best_tid;
+    wchan_out = best_wchan;
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -172,6 +278,15 @@ int main(int argc, char** argv) {
         return EXIT_REMOTE_RESOLVE;
     }
     diag("remote mmap=0x%lx remote dlopen=0x%lx", remote_mmap, remote_dlopen);
+
+    // TR-port (v1.3): jangan panggil alamat dlopen yang tidak di mapping
+    // executable libdl.so — batal sebelum target disentuh lebih jauh.
+    if (!verify_xmap(pid, remote_dlopen, "libdl.so")) {
+        diag("FAIL verify: alamat dlopen tidak di mapping x-perm libdl.so — batal");
+        proc.detach();
+        if (g_logf) std::fclose(g_logf);
+        return EXIT_REMOTE_RESOLVE;
+    }
 
     // Alamat remote tambahan untuk diagnosis + fallback (v1.2). Semuanya
     // LENIENT: bila tak ketemu, jalurnya dilewati dengan catatan — jangan
@@ -230,9 +345,37 @@ int main(int argc, char** argv) {
     diag("payload path tertulis (%zu byte)", path_len);
 
     // 3) call dlopen(scratch, RTLD_NOW) in the target.
+    // v1.3: timeout 10 dtk + retry SEKALI di thread lain yang sedang
+    // tidur. v1.2 hang ~2 dtk di main thread (exit=8) sementara game
+    // tetap hidup — main thread kemungkinan berebut loader lock dengan
+    // thread lain; dlopen dari thread tidur jauh lebih aman.
     uint64_t handle = 0;
     std::vector<uint64_t> dlopen_args = {scratch, RTLD_NOW};
-    bool called = proc.call(remote_dlopen, dlopen_args, handle);
+    bool called = proc.call(remote_dlopen, dlopen_args, handle, 10000);
+    if (!called) {
+        diag("dlopen timeout 10 dtk di thread %d — detach bersih, cek maps dulu",
+             proc.attached_tid());
+        proc.detach();
+        // TR-port: dlopen sebelumnya bisa selesai terlambat — bila payload
+        // sudah ter-map, JANGAN retry (dlopen kedua = crash).
+        if (is_payload_loaded(pid)) {
+            diag("payload ter-load (dlopen selesai terlambat) — lanjut tunggu status");
+            if (g_logf) std::fclose(g_logf);
+            return EXIT_OK;
+        }
+        int tid2 = -1;
+        std::string wchan2;
+        if (pick_sleepy_thread(pid, pid, tid2, wchan2) &&
+            proc.attach_tid(pid, tid2)) {
+            diag("retry dlopen di thread %d (wchan=%s)", tid2, wchan2.c_str());
+            called = proc.call(remote_dlopen, dlopen_args, handle, 10000);
+            if (!called) {
+                diag("retry dlopen juga timeout di thread %d", tid2);
+            }
+        } else {
+            diag("tidak ada thread tidur lain untuk retry — lanjut ke diagnosis dlerror/fallback");
+        }
+    }
 
     if (!called) {
         diag("FAIL dlopen call: panggilan dlopen di pid %d tidak selesai", pid);

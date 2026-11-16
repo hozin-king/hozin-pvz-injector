@@ -1,4 +1,4 @@
-// payload_main.cpp — Hozin PvZ Injector v1.1 (agnostik versi).
+// payload_main.cpp — Hozin PvZ Injector v1.3 (agnostik versi).
 //
 // Arsitektur (dari AUDIT-INJECTOR.md): payload di-dlopen ke proses game
 // oleh injector root (ptrace + dlopen, pola RootInjector generik), lalu:
@@ -107,6 +107,22 @@ static void write_status(const char* status, int menu_ready) {
         }
     }
     LOGE("file status payload tak bisa ditulis di kedua lokasi");
+}
+
+// Marker constructor (v1.3): membuktikan di diagnosis berikutnya apakah
+// constructor payload sempat kembali atau tidak. Tes POCO v1.2: remote
+// dlopen hang (exit=8) — tanpa marker, tak bisa dibedakan "constructor
+// tak kembali" dari "remote call yang timeout". Ditulis ke file TERPISAH
+// (cache game, UID game bisa tulis di sana) supaya tidak mengotori
+// format file status yang diparse aplikasi.
+static const char* kCtorLogPath =
+    "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_ctor.log";
+
+static void ctor_marker(const char* tag) {
+    FILE* f = std::fopen(kCtorLogPath, "a");
+    if (!f) return;
+    std::fprintf(f, "CTOR_%s pid=%d\n", tag, (int)getpid());
+    std::fclose(f);
 }
 
 static void note_failed(const char* name) {
@@ -336,9 +352,31 @@ static bool read_build_id() {
 }
 
 static bool verify_target() {
+    // /proc/self/cmdline bisa sesaat masih "zygote64"/"app_process"
+    // bila payload ter-load sangat awal (identitas proses belum
+    // diterapkan). Tunggu sampai cmdline jadi nama paket beneran
+    // (maks ~10 dtk); paket lain yang sudah jelas BUKAN target langsung
+    // gagal tanpa menunggu. Jalur ptrace (game sudah jalan) tidak
+    // terpengaruh — cmdline sudah benar di pembacaan pertama.
     char pkg[256] = {0};
-    if (!read_cmdline_package(pkg, sizeof(pkg)) ||
-        std::strcmp(pkg, kTargetPackage) != 0) {
+    bool pkg_ok = false;
+    for (int i = 0; i < 50; i++) {
+        if (!read_cmdline_package(pkg, sizeof(pkg))) pkg[0] = '\0';
+        size_t tlen = std::strlen(kTargetPackage);
+        if (std::strcmp(pkg, kTargetPackage) == 0 ||
+            (std::strncmp(pkg, kTargetPackage, tlen) == 0 && pkg[tlen] == ':')) {
+            pkg_ok = true;
+            break;
+        }
+        if (pkg[0] != '\0' && std::strcmp(pkg, "zygote") != 0 &&
+            std::strcmp(pkg, "zygote64") != 0 &&
+            std::strcmp(pkg, "app_process") != 0 &&
+            std::strcmp(pkg, "app_process64") != 0) {
+            break;  // nama paket beneran tapi bukan target
+        }
+        usleep(200 * 1000);
+    }
+    if (!pkg_ok) {
         LOGE("package bukan target (%s) — keluar diam-diam", pkg);
         note_failed("verify:package");
         write_status("UNSUPPORTED", 0);
@@ -472,11 +510,11 @@ static void hook_init_mowers(void* thiz) {
 static void draw_menu() {
     ImGui::SetNextWindowPos(ImVec2(30, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Hozin PvZ Injector v1.1", nullptr)) {
+    if (!ImGui::Begin("Hozin PvZ Injector v1.3", nullptr)) {
         ImGui::End();
         return;
     }
-    ImGui::Text("Hozin PvZ Injector v1.1 — target terverifikasi (simbol 17/17)");
+    ImGui::Text("Hozin PvZ Injector v1.3 — target terverifikasi (simbol 17/17)");
     ImGui::TextDisabled("%s", g_verLine);
     bool gate = gate_open();
     if (gate)
@@ -531,7 +569,7 @@ static void draw_menu() {
     }
     ImGui::Separator();
     ImGui::TextWrapped("Solo/offline saja. Sentuhan pada menu juga diteruskan "
-                       "ke game — pause dulu sebelum ubah toggle. v1.1 tanpa "
+                       "ke game — pause dulu sebelum ubah toggle. v1.3 tanpa "
                        "tanaman kebal / tanpa-cooldown (belum terbukti, "
                        "butuh probe runtime).");
     ImGui::End();
@@ -743,7 +781,7 @@ static void* init_thread(void*) {
 }  // namespace
 
 void payload_init() {
-    LOGI("payload_init: Hozin PvZ Injector v1.1 masuk ke proses target");
+    LOGI("payload_init: Hozin PvZ Injector v1.3 masuk ke proses target");
     pthread_t t;
     if (pthread_create(&t, nullptr, init_thread, nullptr) == 0)
         pthread_detach(t);
@@ -751,6 +789,13 @@ void payload_init() {
         LOGE("init thread gagal dibuat");
 }
 
+// Constructor HANYA spawn detached worker thread lalu LANGSUNG return
+// (sudah begitu sejak v1.0 — diverifikasi dari sumber saat v1.3: tidak
+// ada pemanggilan blocking di jalur ini). Semua kerja berat (resolve
+// simbol, Dobby, ImGui) ada di init_thread. Marker CTOR_ENTER/RETURN
+// membuktikan di diagnosis berikutnya bahwa constructor sempat kembali.
 __attribute__((constructor)) static void on_load() {
+    ctor_marker("ENTER");
     payload_init();
+    ctor_marker("RETURN");
 }

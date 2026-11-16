@@ -57,6 +57,10 @@ object InjectorBridge {
     private const val PAYLOAD_STATUS_CACHE =
         "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_payload.log"
 
+    /** Marker constructor payload (v1.3) — apakah constructor sempat kembali. */
+    private const val CTOR_LOG_CACHE =
+        "/data/data/com.ea.game.pvzfree_row/cache/hozinpvz_ctor.log"
+
     /** Hasil inject lengkap dengan diagnosis (stdout injector + file log). */
     data class InjectResult(val exitCode: Int, val output: String, val diag: String)
 
@@ -182,6 +186,15 @@ object InjectorBridge {
     }
 
     /**
+     * TR-port (v1.3) — anti-double-load: true bila payload sudah ter-map
+     * di proses game (file staging hozinpvz_payload.so ATAU salinan native
+     * libpayload.so — pola "payload.so" cocok untuk keduanya). dlopen
+     * kedua = constructor kedua = double DobbyHook pada alamat yang sama
+     * = game crash (bukti TR v2.2). Dicek SEBELUM tiap percobaan dlopen.
+     */
+    fun isPayloadLoaded(pid: Int): Boolean = isLibLoaded(pid, "payload\\.so")
+
+    /**
      * Luncurkan game. Utama: launch intent PackageManager (butuh <queries>
      * — sudah ada di manifest v1.1). Cadangan: monkey via su (tak butuh
      * nama activity).
@@ -228,23 +241,67 @@ object InjectorBridge {
         return if (r.exitCode == 0) PAYLOAD_TMP else null
     }
 
-    /** Inject + kumpulkan diagnosis (stdout; bila kosong, baca file log). */
+    /**
+     * Inject + kumpulkan diagnosis (stdout; bila kosong, baca file log).
+     *
+     * TR-port (v1.3) — retry s.d. 3x: [cache game → native lib → cache
+     * game] (TR: [/data/local/tmp → native → /data/local/tmp]; PvZ memakai
+     * cache game sebagai jalur utama karena /data/local/tmp terbukti tak
+     * bisa dibaca proses PvZ — v1.1). Antar percobaan: jeda 1 dtk + cek
+     * maps — dlopen percobaan sebelumnya bisa selesai TERLAMBAT setelah
+     * timeout, dan dlopen kedua ke payload yang sudah ter-map = crash.
+     * Bila payload sudah ter-load sebelum percobaan pertama (mis. tap
+     * Inject dua kali), dlopen dilewati total.
+     */
     fun inject(context: Context, pid: Int): InjectResult {
         ensureExecutable(context)
+        if (isPayloadLoaded(pid)) {
+            return InjectResult(
+                0, "",
+                "payload sudah ter-load di pid $pid — lewati dlopen, langsung tunggu status"
+            )
+        }
         val staged = stagePayload(context)
         // Fallback: coba path asli bila staging gagal (mis. /data/local/tmp
         // tak bisa ditulis) — injector yang akan membuktikan bisa/tidak.
-        val payload = staged ?: payloadPath(context)
-        val r = RootShell.exec("${injectorPath(context)} $pid $payload")
-        var diag = r.output.trim()
-        if (diag.isEmpty()) {
-            val log = RootShell.exec("cat '$INJECT_LOG' 2>/dev/null")
-            diag = log.output.trim()
+        val primary = staged ?: payloadPath(context)
+        val attempts = arrayOf(primary, payloadPath(context), primary)
+        var last: InjectResult? = null
+        for ((i, path) in attempts.withIndex()) {
+            if (i > 0) {
+                Thread.sleep(1000)
+                // Percobaan sebelumnya mungkin sudah me-load payload tapi
+                // hasilnya tak terbaca — cek maps dulu (TR-port).
+                if (isPayloadLoaded(pid)) {
+                    return InjectResult(
+                        0, "",
+                        "payload ter-load (percobaan sebelumnya) — stop retry\n" +
+                            (last?.diag ?: "")
+                    )
+                }
+            }
+            val r = RootShell.exec("${injectorPath(context)} $pid $path")
+            var diag = r.output.trim()
+            if (diag.isEmpty()) {
+                val log = RootShell.exec("cat '$INJECT_LOG' 2>/dev/null")
+                diag = log.output.trim()
+            }
+            // v1.3: marker constructor payload (apakah constructor sempat
+            // kembali — membedakan "constructor tak kembali" dari "remote
+            // call yang timeout" saat dlopen hang).
+            val ctor = RootShell.exec("cat '$CTOR_LOG_CACHE' 2>/dev/null").output.trim()
+            if (ctor.isNotEmpty()) diag = "$diag\nctor log:\n$ctor"
+            // Catat jalur load yang dipakai tiap percobaan — penting saat
+            // dlopen gagal (bedakan cache game vs native di diagnosis).
+            if (diag.isNotEmpty()) diag = "percobaan ${i + 1}/3 (TR-port) — payload path dipakai: $path\n$diag"
+            last = InjectResult(r.exitCode, r.output, diag)
+            if (r.exitCode == 0) return last
+            // Timeout (8) & NULL (9) sama-sama dicoba ulang — penyebabnya
+            // bisa transien (loader lock). Tidak ada kode "crash" tersendiri
+            // di injector PvZ; bila game mati, percobaan berikut gagal
+            // attach dan loop berakhir dengan diagnosisnya.
         }
-        // Catat jalur payload yang dipakai — penting saat dlopen gagal
-        // (bedakan cache game vs /data/local/tmp di diagnosis).
-        if (diag.isNotEmpty()) diag = "payload path dipakai: $payload\n$diag"
-        return InjectResult(r.exitCode, r.output, diag)
+        return last ?: InjectResult(1, "", "inject gagal tanpa percobaan")
     }
 
     /** Arti exit code injector (v1.1) dalam bahasa manusia. */
@@ -256,7 +313,7 @@ object InjectorBridge {
         5 -> "libc/libdl tidak ketemu di proses game (layout maps aneh)"
         6 -> "alokasi memori di proses game gagal"
         7 -> "tulis path payload ke memori game gagal"
-        8 -> "panggilan dlopen di game tidak selesai (game hang/crash?)"
+        8 -> "panggilan dlopen di game tidak selesai (timeout 10 dtk + retry thread lain, lalu retry 3x; bila tetap gagal, salin diagnosis)"
         9 -> "dlopen payload ditolak — baca baris dlerror di diagnosis (alasan linker yang sebenarnya)"
         else -> "gagal tak dikenal (exit=$exitCode)"
     }
