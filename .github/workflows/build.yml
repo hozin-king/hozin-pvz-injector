@@ -67,5 +67,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "HozinPvZInjector-$VERSION.apk" --clobber
           else
-            gh release create "$TAG" "HozinPvZInjector-$VERSION.apk" --title "Hozin PvZ Injector $VERSION" --notes "Build otomatis dari branch main. Root injector untuk Plants vs Zombies 2 Free 3.18.0 (solo/offline saja). Fitur: sun tak habis, 1-hit kill, tanam gratis, super mower. Tanpa coins/gems/IAP. Butuh HP root + PvZ2 3.18.0 asli."
+            gh release create "$TAG" "HozinPvZInjector-$VERSION.apk" --title "Hozin PvZ Injector $VERSION" --notes "Build otomatis dari branch main. Root injector untuk Plants vs Zombies 2 Free (agnostik versi — gate simbol, teruji 3.19.0; solo/offline saja). Fitur: sun tak habis, 1-hit kill, tanam gratis, super mower. Tanpa coins/gems/IAP. Butuh HP root + PvZ2 asli."
           fi

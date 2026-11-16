@@ -134,6 +134,12 @@ object InjectorBridge {
         return r.output.trim()
     }
 
+    /** Baca ctor log payload (v1.4 — dipakai layar diagnosis). "" bila tak ada. */
+    fun readCtorLog(): String {
+        val r = RootShell.exec("cat '$CTOR_LOG_CACHE' 2>/dev/null")
+        return r.output.trim()
+    }
+
     /** Parse isi file status payload. status "" = file belum ada/tak terbaca. */
     fun parsePayloadStatus(raw: String): PayloadStatus {
         if (raw.isEmpty()) return PayloadStatus("", "-", "-", "-", false, "")
@@ -267,17 +273,19 @@ object InjectorBridge {
         val primary = staged ?: payloadPath(context)
         val attempts = arrayOf(primary, payloadPath(context), primary)
         var last: InjectResult? = null
+        // v1.4 — kumpulkan diagnosis SEMUA percobaan (dulu hanya percobaan
+        // terakhir yang kembali, alasan percobaan 1/3 yang gagal hilang).
+        val allDiag = StringBuilder()
         for ((i, path) in attempts.withIndex()) {
             if (i > 0) {
                 Thread.sleep(1000)
                 // Percobaan sebelumnya mungkin sudah me-load payload tapi
                 // hasilnya tak terbaca — cek maps dulu (TR-port).
                 if (isPayloadLoaded(pid)) {
-                    return InjectResult(
-                        0, "",
-                        "payload ter-load (percobaan sebelumnya) — stop retry\n" +
-                            (last?.diag ?: "")
-                    )
+                    val d = "payload ter-load (percobaan sebelumnya) — stop retry\n" +
+                        (last?.diag ?: "")
+                    val full = if (allDiag.isNotEmpty()) "$allDiag\n$d" else d
+                    return InjectResult(0, "", full)
                 }
             }
             val r = RootShell.exec("${injectorPath(context)} $pid $path")
@@ -289,19 +297,29 @@ object InjectorBridge {
             // v1.3: marker constructor payload (apakah constructor sempat
             // kembali — membedakan "constructor tak kembali" dari "remote
             // call yang timeout" saat dlopen hang).
-            val ctor = RootShell.exec("cat '$CTOR_LOG_CACHE' 2>/dev/null").output.trim()
+            val ctor = readCtorLog()
             if (ctor.isNotEmpty()) diag = "$diag\nctor log:\n$ctor"
             // Catat jalur load yang dipakai tiap percobaan — penting saat
             // dlopen gagal (bedakan cache game vs native di diagnosis).
             if (diag.isNotEmpty()) diag = "percobaan ${i + 1}/3 (TR-port) — payload path dipakai: $path\n$diag"
+            // v1.4 — catat ALASAN tiap percobaan gagal, jangan hanya exit=N.
+            if (r.exitCode != 0) {
+                val failLine = "percobaan ${i + 1}/3 GAGAL: exit=${r.exitCode} — ${failureReason(r.exitCode)}"
+                diag = if (diag.isNotEmpty()) "$diag\n$failLine" else failLine
+            }
+            if (allDiag.isNotEmpty()) allDiag.append("\n")
+            allDiag.append(diag)
             last = InjectResult(r.exitCode, r.output, diag)
-            if (r.exitCode == 0) return last
+            if (r.exitCode == 0) return InjectResult(r.exitCode, r.output, allDiag.toString())
             // Timeout (8) & NULL (9) sama-sama dicoba ulang — penyebabnya
             // bisa transien (loader lock). Tidak ada kode "crash" tersendiri
             // di injector PvZ; bila game mati, percobaan berikut gagal
             // attach dan loop berakhir dengan diagnosisnya.
         }
-        return last ?: InjectResult(1, "", "inject gagal tanpa percobaan")
+        return InjectResult(
+            last?.exitCode ?: 1, last?.output ?: "",
+            if (allDiag.isNotEmpty()) allDiag.toString() else "inject gagal tanpa percobaan"
+        )
     }
 
     /** Arti exit code injector (v1.1) dalam bahasa manusia. */

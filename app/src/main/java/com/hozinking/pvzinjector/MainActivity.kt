@@ -32,6 +32,13 @@ import com.hozinking.pvzinjector.databinding.ActivityMainBinding
  * retry thread tidur tetap ada dari rencana v1.3 awal. Zygisk DITAHAN
  * untuk v1.3 (perintah user: pakai punya TR dulu).
  *
+ * v1.4 — init payload bertahap + terinstrumentasi: marker per langkah di
+ * file status + signal handler diagnosis (STATUS=CRASH) di payload.
+ * Diagnosis aplikasi menampilkan ISI file status payload + ctor log apa
+ * adanya, alasan tiap percobaan inject yang gagal, dan status hidup/mati
+ * game setelah menunggu status; toast "menunggu status payload" diberi
+ * timeout jelas 15 dtk.
+ *
  * AGNOSTIK VERSI: aplikasi TIDAK menolak berdasarkan versionCode. Gate
  * ada di payload — semua 17 simbol hook harus ter-resolve. Setelah inject,
  * aplikasi membaca file status payload (±10 dtk) dan menampilkan READY
@@ -100,7 +107,7 @@ class MainActivity : AppCompatActivity() {
     private fun runAutoInject() {
         autoRunning = true
         try {
-            log("== Inject v1.3 — alur otomatis ==")
+            log("== Inject v1.4 — alur otomatis ==")
             FloatingOverlay.show(this, "⏳ Hozin PvZ: memulai…")
 
             // 1. Root.
@@ -183,12 +190,27 @@ class MainActivity : AppCompatActivity() {
             log(if (pidAfter != null) "game masih jalan setelah inject (pid $pidAfter)"
                 else "game MATI setelah inject — kemungkinan crash saat remote call")
             if (result.exitCode == 0) {
-                // dlopen berhasil — tapi READY/UNSUPPORTED diputuskan
-                // payload (simbol hook). Tunggu file statusnya ±10 dtk.
+                // dlopen berhasil — tapi READY/UNSUPPORTED/PARTIAL/CRASH
+                // diputuskan payload (simbol hook + init). Tunggu file
+                // statusnya 15 dtk (v1.4 — dulu 10 dtk, terlalu mepet
+                // saat game masih loading level).
                 FloatingOverlay.setStatus("⏳ Hozin PvZ: menunggu status payload…")
-                val ps = waitForPayloadStatus(10)
-                when (ps.status) {
-                    "READY" -> {
+                val ps = waitForPayloadStatus(15)
+                // v1.4 — tampilkan isi file status payload + ctor log apa
+                // adanya, supaya titik crash init payload (bila ada)
+                // langsung kelihatan di layar diagnosis (dan ikut
+                // tersalin lewat tombol "Salin diagnosis").
+                val rawStatus = InjectorBridge.readPayloadStatus()
+                log("--- isi file status payload ---")
+                log(if (rawStatus.isNotEmpty()) rawStatus else "(file status payload belum ada)")
+                val ctorLog = InjectorBridge.readCtorLog()
+                if (ctorLog.isNotEmpty()) log("--- ctor log ---\n$ctorLog")
+                // v1.4 — status hidup/mati game setelah menunggu status.
+                val pidFinal = InjectorBridge.findPid(InjectorBridge.TARGET_PACKAGE)
+                log(if (pidFinal != null) "game: masih jalan (pid $pidFinal)"
+                    else "game: MATI — crash saat init payload (cari STATUS=CRASH di atas)")
+                when {
+                    ps.status == "READY" -> {
                         log("payload READY — semua 17 simbol ketemu (BuildID ${ps.buildId}, lib ${ps.libSize} B)")
                         if (!ps.menu) {
                             log("catatan: menu dalam game tidak tampil (eglSwapBuffers tak ketemu) — fitur tetap ter-hook, toggle tidak bisa diubah")
@@ -196,7 +218,15 @@ class MainActivity : AppCompatActivity() {
                         log("inject OK — kembali ke game, menu mod muncul di layar")
                         FloatingOverlay.setStatus("✅ Hozin PvZ: BERHASIL — menu di dalam game")
                     }
-                    "UNSUPPORTED" -> {
+                    ps.status.startsWith("PARTIAL") -> {
+                        log("payload PARTIAL (${ps.status}) — sebagian hook gagal: ${ps.failed} — game tetap jalan, fitur yang gagal nonaktif")
+                        FloatingOverlay.setStatus("⚠️ Hozin PvZ: sebagian hook gagal (${ps.failed})")
+                    }
+                    ps.status.startsWith("CRASH") -> {
+                        log("payload CRASH saat init: ${ps.status} — langkah terakhir ada di STEPLOG di atas. Salin diagnosis ini.")
+                        FloatingOverlay.setStatus("❌ Hozin PvZ: payload crash saat init")
+                    }
+                    ps.status == "UNSUPPORTED" -> {
                         val v = versionName ?: "?"
                         val c = version ?: -1
                         log("versi $v (code $c) BELUM didukung — simbol tidak ditemukan: ${ps.failed}")
@@ -204,9 +234,9 @@ class MainActivity : AppCompatActivity() {
                         FloatingOverlay.setStatus("❌ Hozin PvZ: versi belum didukung — simbol ${ps.failed} tidak ketemu")
                     }
                     else -> {
-                        log("inject exit 0 (dlopen OK) tapi status payload tak terbaca setelah 10 dtk — " +
+                        log("inject exit 0 (dlopen OK) tapi status payload tak terbaca setelah 15 dtk — " +
                             "payload mungkin masih init, atau file status tak bisa ditulis. Cek lagi lewat tombol Cek PvZ2 / tap Inject ulang.")
-                        FloatingOverlay.setStatus("⚠️ Hozin PvZ: status payload tak terbaca")
+                        FloatingOverlay.setStatus("⚠️ Hozin PvZ: status payload tak terbaca (15 dtk)")
                     }
                 }
             } else {

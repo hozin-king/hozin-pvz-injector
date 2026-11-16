@@ -1,4 +1,4 @@
-// payload_main.cpp — Hozin PvZ Injector v1.3 (agnostik versi).
+// payload_main.cpp — Hozin PvZ Injector v1.4 (agnostik versi).
 //
 // Arsitektur (dari AUDIT-INJECTOR.md): payload di-dlopen ke proses game
 // oleh injector root (ptrace + dlopen, pola RootInjector generik), lalu:
@@ -35,7 +35,9 @@
 #include "payload.h"
 
 #include <android/log.h>
+#include <csignal>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <link.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -82,21 +84,43 @@ static char g_failed[512] = {0};
 static char g_resolveLog[4096] = {0};
 static char g_verLine[160] = {0};
 
+// ---- v1.4: jejak langkah init (step markers) + signal handler diagnosis.
+//
+// v1.3: dlopen BERHASIL pertama kali (handle OK, game hidup, exit=0) tapi
+// game tetap crash SETELAH itu, tanpa jejak — file status hanya ditulis
+// di AKHIR init (READY/UNSUPPORTED), jadi crash di tengah init tidak
+// meninggalkan apa pun. v1.4 menulis SETIAP langkah ke file status
+// (flush tiap baris): bila crash, baris terakhir yang tertulis = titik
+// crashnya. Format file status tetap kompatibel (STATUS/FAILED/BUILDID/
+// LIBSIZE/MENU/RESOLVE sama seperti v1.1–v1.3) + kunci baru STEP
+// (langkah terakhir), STEPLOG (semua langkah, dipisah ';'), HOOKS
+// (hasil pasang hook per nama).
+static char g_step[96] = "INIT";
+static char g_stepLog[4096] = {0};
+static char g_curStatus[32] = "INIT";
+static char g_hookLog[2048] = {0};
+static pthread_mutex_t g_stepMutex = PTHREAD_MUTEX_INITIALIZER;
+
 // Tulis file status (best-effort, dua lokasi). Format baris kunci=nilai:
-//   STATUS=READY|UNSUPPORTED
-//   FAILED=<daftar simbol gagal, dipisah koma, atau "-">
+//   STATUS=READY|UNSUPPORTED|PARTIAL <hook>|CRASH <sig> <addr> <langkah>
+//   STEP=<langkah terakhir>
+//   FAILED=<daftar simbol/hook gagal, dipisah koma, atau "-">
 //   BUILDID=<hex 40 karakter atau "-">
 //   LIBSIZE=<byte>
 //   MENU=1|0
 //   RESOLVE=<baris-baris g_resolveLog, dipisah ';'>
-static void write_status(const char* status, int menu_ready) {
+//   HOOKS=<baris-baris g_hookLog, dipisah ';'>
+//   STEPLOG=<semua langkah, dipisah ';'>
+static void write_status_locked(const char* status, int menu_ready) {
+    std::snprintf(g_curStatus, sizeof(g_curStatus), "%s", status);
     char body[8192];
     std::snprintf(body, sizeof(body),
-                  "STATUS=%s\nFAILED=%s\nBUILDID=%s\nLIBSIZE=%llu\nMENU=%d\n"
-                  "RESOLVE=%s\n",
-                  status, g_failed[0] ? g_failed : "-",
+                  "STATUS=%s\nSTEP=%s\nFAILED=%s\nBUILDID=%s\nLIBSIZE=%llu\nMENU=%d\n"
+                  "RESOLVE=%s\nHOOKS=%s\nSTEPLOG=%s\n",
+                  status, g_step, g_failed[0] ? g_failed : "-",
                   g_buildIdHex[0] ? g_buildIdHex : "-",
-                  (unsigned long long)g_libSize, menu_ready, g_resolveLog);
+                  (unsigned long long)g_libSize, menu_ready, g_resolveLog,
+                  g_hookLog, g_stepLog);
     const char* paths[2] = {kStatusPathTmp, kStatusPathCache};
     for (int i = 0; i < 2; i++) {
         FILE* f = std::fopen(paths[i], "w");
@@ -107,6 +131,100 @@ static void write_status(const char* status, int menu_ready) {
         }
     }
     LOGE("file status payload tak bisa ditulis di kedua lokasi");
+}
+
+static void write_status(const char* status, int menu_ready) {
+    pthread_mutex_lock(&g_stepMutex);
+    write_status_locked(status, menu_ready);
+    pthread_mutex_unlock(&g_stepMutex);
+}
+
+// Catat satu langkah init + flush file status SEKARANG. Dipanggil dari
+// init thread (resolve/hook) DAN render thread (lazy ImGui) — mutex
+// menjaga g_stepLog dari interleave antar thread.
+static void mark_step(const char* tag) {
+    pthread_mutex_lock(&g_stepMutex);
+    std::snprintf(g_step, sizeof(g_step), "%s", tag);
+    size_t cur = std::strlen(g_stepLog);
+    if (cur + std::strlen(tag) + 2 < sizeof(g_stepLog)) {
+        std::strncat(g_stepLog, tag, sizeof(g_stepLog) - cur - 1);
+        std::strncat(g_stepLog, "; ", sizeof(g_stepLog) - std::strlen(g_stepLog) - 1);
+    }
+    write_status_locked(g_curStatus, 0);
+    pthread_mutex_unlock(&g_stepMutex);
+}
+
+// ---- v1.4: signal handler diagnosis (async-signal-safe).
+// Bila init thread / hook crash (SIGSEGV/SIGABRT/SIGBUS), handler ini
+// menulis satu baris STATUS=CRASH ke file status (kedua lokasi) lalu
+// mengembalikan handler default + re-raise — crash tetap crash seperti
+// biasa, tapi meninggalkan jejak langkah terakhir. TIDAK malloc, TIDAK
+// stdio, TIDAK lock — hanya open/write/close + konversi manual.
+static volatile sig_atomic_t g_crashHandlerInstalled = 0;
+
+static void crash_write_all(int fd, const char* s, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, s + off, n - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+}
+static void crash_write_cstr(int fd, const char* s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    crash_write_all(fd, s, n);
+}
+static void crash_write_hex(int fd, uintptr_t v) {
+    char buf[18];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        int nib = (int)((v >> ((15 - i) * 4)) & 0xf);
+        buf[2 + i] = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10);
+    }
+    crash_write_all(fd, buf, 18);
+}
+static void crash_write_dec(int fd, int v) {
+    if (v == 0) { crash_write_all(fd, "0", 1); return; }
+    char buf[12];
+    int pos = 0;
+    if (v < 0) buf[pos++] = '-';
+    int x = v < 0 ? -v : v;
+    char rev[12]; int r = 0;
+    while (x > 0 && r < 11) { rev[r++] = (char)('0' + x % 10); x /= 10; }
+    while (r > 0) buf[pos++] = rev[--r];
+    crash_write_all(fd, buf, (size_t)pos);
+}
+
+static void crash_handler(int sig, siginfo_t* info, void* /*ctx*/) {
+    const char* paths[2] = {kStatusPathCache, kStatusPathTmp};
+    for (int i = 0; i < 2; i++) {
+        int fd = open(paths[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) continue;
+        crash_write_cstr(fd, "STATUS=CRASH ");
+        crash_write_dec(fd, sig);
+        crash_write_cstr(fd, " ");
+        crash_write_hex(fd, (uintptr_t)(info ? info->si_addr : nullptr));
+        crash_write_cstr(fd, " ");
+        crash_write_cstr(fd, g_step);
+        crash_write_cstr(fd, "\n");
+        close(fd);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handler() {
+    if (g_crashHandlerInstalled) return;
+    g_crashHandlerInstalled = 1;
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
 }
 
 // Marker constructor (v1.3): membuktikan di diagnosis berikutnya apakah
@@ -135,6 +253,18 @@ static void note_resolve(const char* name, const char* how, void* addr) {
     std::snprintf(line, sizeof(line), "%s: %s @ %p; ", name, how, addr);
     std::strncat(g_resolveLog, line,
                  sizeof(g_resolveLog) - std::strlen(g_resolveLog) - 1);
+}
+
+// v1.4: catat hasil pasang hook per nama (file status HOOKS + FAILED).
+static void note_hook(const char* name, bool ok, int rc) {
+    char line[192];
+    if (ok)
+        std::snprintf(line, sizeof(line), "%s: OK; ", name);
+    else
+        std::snprintf(line, sizeof(line), "%s: FAIL rc=%d; ", name, rc);
+    std::strncat(g_hookLog, line,
+                 sizeof(g_hookLog) - std::strlen(g_hookLog) - 1);
+    if (!ok) note_failed(name);
 }
 
 // Nama mangled (salin persis dari REA — .dynsym libpvz.so).
@@ -352,6 +482,7 @@ static bool read_build_id() {
 }
 
 static bool verify_target() {
+    mark_step("VERIFY_START");
     // /proc/self/cmdline bisa sesaat masih "zygote64"/"app_process"
     // bila payload ter-load sangat awal (identitas proses belum
     // diterapkan). Tunggu sampai cmdline jadi nama paket beneran
@@ -379,6 +510,7 @@ static bool verify_target() {
     if (!pkg_ok) {
         LOGE("package bukan target (%s) — keluar diam-diam", pkg);
         note_failed("verify:package");
+        mark_step("VERIFY_FAIL:package");
         write_status("UNSUPPORTED", 0);
         return false;
     }
@@ -390,12 +522,14 @@ static bool verify_target() {
     if (g_libBase == 0 || g_execBase == 0 || g_execSize == 0) {
         LOGE("libpvz.so tidak termuat — keluar diam-diam");
         note_failed("verify:libpvz-not-loaded");
+        mark_step("VERIFY_FAIL:libpvz-not-loaded");
         write_status("UNSUPPORTED", 0);
         return false;
     }
     if (!find_lib_path()) {
         LOGE("path libpvz.so tidak ketemu di maps");
         note_failed("verify:lib-path");
+        mark_step("VERIFY_FAIL:lib-path");
         write_status("UNSUPPORTED", 0);
         return false;
     }
@@ -420,10 +554,13 @@ static bool verify_target() {
 // per-versi (3180). Return nullptr bila ketiganya gagal — pemanggil yang
 // memutuskan (init BATAL total bila satu simbol kunci gagal).
 static void* resolve_fn(const char* mangled, const char* pattern_name) {
+    char tag[160];
     void* addr = dlsym(RTLD_DEFAULT, mangled);
     if (addr) {
         LOGI("resolve %s via dlsym: %p", pattern_name, addr);
         note_resolve(pattern_name, "dlsym", addr);
+        std::snprintf(tag, sizeof(tag), "RESOLVE=%s:OK", pattern_name);
+        mark_step(tag);
         return addr;
     }
     const PvzPattern* pat = pvz_find_pattern_generic(pattern_name);
@@ -432,6 +569,8 @@ static void* resolve_fn(const char* mangled, const char* pattern_name) {
         if (addr) {
             LOGI("resolve %s via pattern-generic: %p", pattern_name, addr);
             note_resolve(pattern_name, "pattern-generic", addr);
+            std::snprintf(tag, sizeof(tag), "RESOLVE=%s:OK", pattern_name);
+            mark_step(tag);
             return addr;
         }
     }
@@ -441,6 +580,8 @@ static void* resolve_fn(const char* mangled, const char* pattern_name) {
         if (addr) {
             LOGI("resolve %s via pattern-3180: %p", pattern_name, addr);
             note_resolve(pattern_name, "pattern-3180", addr);
+            std::snprintf(tag, sizeof(tag), "RESOLVE=%s:OK", pattern_name);
+            mark_step(tag);
             return addr;
         }
     }
@@ -448,18 +589,32 @@ static void* resolve_fn(const char* mangled, const char* pattern_name) {
          pattern_name);
     note_resolve(pattern_name, "GAGAL", nullptr);
     note_failed(pattern_name);
+    std::snprintf(tag, sizeof(tag), "RESOLVE=%s:FAIL", pattern_name);
+    mark_step(tag);
     return nullptr;
 }
 
 static bool hook_one(void* addr, void* repl, void** orig_out, const char* name) {
-    if (!addr) return false;
+    char tag[160];
+    if (!addr) {
+        note_hook(name, false, -1);
+        std::snprintf(tag, sizeof(tag), "HOOK=%s:FAIL no-addr", name);
+        mark_step(tag);
+        return false;
+    }
     int rc = DobbyHook(addr, repl, orig_out);
     if (rc != 0 || *orig_out == nullptr) {
         LOGE("DobbyHook %s gagal rc=%d", name, rc);
         *orig_out = nullptr;
+        note_hook(name, false, rc);
+        std::snprintf(tag, sizeof(tag), "HOOK=%s:FAIL rc=%d", name, rc);
+        mark_step(tag);
         return false;
     }
     LOGI("hook %s terpasang @ %p", name, addr);
+    note_hook(name, true, 0);
+    std::snprintf(tag, sizeof(tag), "HOOK=%s:OK", name);
+    mark_step(tag);
     return true;
 }
 
@@ -510,11 +665,11 @@ static void hook_init_mowers(void* thiz) {
 static void draw_menu() {
     ImGui::SetNextWindowPos(ImVec2(30, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Hozin PvZ Injector v1.3", nullptr)) {
+    if (!ImGui::Begin("Hozin PvZ Injector v1.4", nullptr)) {
         ImGui::End();
         return;
     }
-    ImGui::Text("Hozin PvZ Injector v1.3 — target terverifikasi (simbol 17/17)");
+    ImGui::Text("Hozin PvZ Injector v1.4 — target terverifikasi (simbol 17/17)");
     ImGui::TextDisabled("%s", g_verLine);
     bool gate = gate_open();
     if (gate)
@@ -569,40 +724,72 @@ static void draw_menu() {
     }
     ImGui::Separator();
     ImGui::TextWrapped("Solo/offline saja. Sentuhan pada menu juga diteruskan "
-                       "ke game — pause dulu sebelum ubah toggle. v1.3 tanpa "
+                       "ke game — pause dulu sebelum ubah toggle. v1.4 tanpa "
                        "tanaman kebal / tanpa-cooldown (belum terbukti, "
                        "butuh probe runtime).");
     ImGui::End();
 }
 
-static void setup_imgui(int w, int h) {
+static bool setup_imgui(int w, int h) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    if (!ImGui::GetCurrentContext()) return false;
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
-    ImGui_ImplOpenGL3_Init("#version 100");
+    if (!ImGui_ImplOpenGL3_Init("#version 100")) return false;
     ImFontConfig font_cfg;
     font_cfg.SizePixels = 22.0f;
     io.Fonts->AddFontDefault(&font_cfg);
     ImGui::GetStyle().ScaleAllSizes(2.5f);
     g_imguiSetup = true;
+    return true;
 }
 
 static EGLBoolean hook_egl_swap_buffers(EGLDisplay dpy, EGLSurface surface) {
     if (g_menuReady) {
-        EGLint w = 0, h = 0;
-        eglQuerySurface(dpy, surface, EGL_WIDTH, &w);
-        eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
-        if (w > 0 && h > 0) {
-            if (!g_imguiSetup) setup_imgui(w, h);
-            ImGui_ImplAndroid_NewFrame(w, h);
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui::NewFrame();
-            draw_menu();
-            ImGui::EndFrame();
-            ImGui::Render();
-            glViewport(0, 0, w, h);
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (!g_imguiSetup) {
+            // v1.4 LAZY: konteks ImGui HANYA dibuat di swap pertama yang
+            // konteks GL-nya valid. Init thread tidak punya konteks GL —
+            // tersangka utama crash v1.3 (ImGui/EGL dipanggil tanpa
+            // konteks). Bila konteks belum ada, lewati frame ini dan
+            // coba lagi di swap berikutnya — tanpa crash.
+            EGLContext ctx = eglGetCurrentContext();
+            EGLDisplay cur = eglGetCurrentDisplay();
+            if (ctx == EGL_NO_CONTEXT || cur == EGL_NO_DISPLAY) {
+                static bool skipLogged = false;
+                if (!skipLogged) {
+                    skipLogged = true;
+                    mark_step("IMGUI_SKIP no-gl-context");
+                }
+            } else {
+                EGLint w = 0, h = 0;
+                eglQuerySurface(dpy, surface, EGL_WIDTH, &w);
+                eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
+                if (w > 0 && h > 0) {
+                    mark_step("IMGUI_START");
+                    if (setup_imgui(w, h)) {
+                        mark_step("IMGUI_OK");
+                    } else {
+                        mark_step("IMGUI_SKIP init-failed");
+                        g_menuReady = false;  // jangan coba lagi tiap frame
+                    }
+                }
+            }
+        }
+        if (g_imguiSetup) {
+            EGLint w = 0, h = 0;
+            eglQuerySurface(dpy, surface, EGL_WIDTH, &w);
+            eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
+            if (w > 0 && h > 0) {
+                ImGui_ImplAndroid_NewFrame(w, h);
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui::NewFrame();
+                draw_menu();
+                ImGui::EndFrame();
+                ImGui::Render();
+                glViewport(0, 0, w, h);
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            }
         }
     }
     return g_origSwapBuffers ? g_origSwapBuffers(dpy, surface)
@@ -642,6 +829,7 @@ static void install_input_hook() {
     if (!libinput) libinput = dlopen("/system/lib/libinput.so", RTLD_NOW | RTLD_LOCAL);
     if (!libinput) {
         LOGI("input hook: libinput.so tidak bisa dibuka — menu render saja");
+        mark_step("INPUT=SKIP no-libinput");
         return;
     }
     void* sym = dlsym(libinput,
@@ -650,6 +838,7 @@ static void install_input_hook() {
         int rc = DobbyHook(sym, (void*)hook_consume, (void**)&g_origConsume);
         if (rc == 0 && g_origConsume) {
             LOGI("input hook terpasang (InputConsumer::consume)");
+            mark_step("INPUT=consume:OK");
             return;
         }
         LOGE("input hook consume gagal rc=%d", rc);
@@ -660,20 +849,26 @@ static void install_input_hook() {
         int rc = DobbyHook(sym_old, (void*)hook_input_old, (void**)&g_origInputOld);
         if (rc == 0 && g_origInputOld) {
             LOGI("input hook terpasang (initializeMotionEvent, fallback)");
+            mark_step("INPUT=fallback:OK");
             return;
         }
     }
     LOGI("input hook tidak tersedia — menu render, sentuhan mungkin tak jalan");
+    mark_step("INPUT=SKIP no-symbol");
 }
 
 // ------------------------------------------------------------------- init
 
 static void* init_thread(void*) {
+    install_crash_handler();
+    mark_step("INIT_START");
     if (!verify_target()) return nullptr;
+    mark_step("VERIFY_OK");
 
     // --- GATE UTAMA v1.1: resolve SEMUA 17 simbol kunci dulu. Bila SATU
     // saja gagal -> init BATAL total, tanpa hook setengah jalan, dan file
     // status menulis UNSUPPORTED + daftar simbol yang gagal. ---
+    mark_step("RESOLVE_START");
     void* aIsAdventure = resolve_fn(kSymIsAdventure, "IsAdventureMode");
     void* aIsAppLoaded = resolve_fn(kSymIsAppLoaded, "IsAppLoaded");
     void* aIsChallenge = resolve_fn(kSymIsChallenge, "IsChallengeMode");
@@ -692,9 +887,21 @@ static void* init_thread(void*) {
     void* aBoardCtor   = resolve_fn(kSymBoardCtor, "BoardCtor");
     void* aStartLevel  = resolve_fn(kSymStartLevel, "StartLevel");
 
+    {
+        void* addrs[17] = {aIsAdventure, aIsAppLoaded, aIsChallenge,
+            aIsPuzzle, aIsSurvival, aIsLastStand, aIsIZombie, aCanPinata,
+            aTakeSun, aCanTakeSun, aZombieDmg, aPlantCost, aInitMowers,
+            aSuperMower, aAddSun, aBoardCtor, aStartLevel};
+        int nOk = 0;
+        for (int i = 0; i < 17; i++) if (addrs[i]) nOk++;
+        char tag[48];
+        std::snprintf(tag, sizeof(tag), "RESOLVE_DONE %d/17", nOk);
+        mark_step(tag);
+    }
     if (g_failed[0]) {
         LOGE("simbol kunci tidak lengkap (%s) — versi game ini belum "
              "didukung, init BATAL tanpa hook", g_failed);
+        mark_step("RESOLVE_FAIL");
         write_status("UNSUPPORTED", 0);
         return nullptr;
     }
@@ -708,7 +915,11 @@ static void* init_thread(void*) {
     g_fnCanPinata   = (LawnAppBoolFn)aCanPinata;
     g_gateFnsOk = true;
 
-    // --- hook fitur (semua alamat sudah terbukti ada) ---
+    // --- hook fitur SATU PER SATU (v1.4 fail-soft): satu hook gagal =
+    // lewati hook itu saja, lanjut ke hook lain — JANGAN abort brutal,
+    // JANGAN crash. Hook yang gagal dicatat di g_failed -> status akhir
+    // PARTIAL (bukan READY), game tetap jalan. ---
+    mark_step("HOOK_START");
     {
         void* o1 = nullptr; void* o2 = nullptr;
         bool h1 = hook_one(aTakeSun, (void*)hook_take_sun, &o1, "TakeSunMoney");
@@ -756,7 +967,9 @@ static void* init_thread(void*) {
             g_origStartLevel = (StartLevelFn)o;
     }
 
-    // --- render + input (menu). Gagal di sini = tanpa menu, fitur tetap
+    // --- render + input (menu). Hook eglSwapBuffers dipasang TANPA
+    // konteks ImGui (v1.4 LAZY — ImGui dibuat di swap pertama yang
+    // konteks GL-nya valid). Gagal di sini = tanpa menu, fitur tetap
     // jalan lewat toggle terakhir (default MATI = aman).
     void* swap = dlsym(RTLD_DEFAULT, "eglSwapBuffers");
     if (!swap) swap = dlsym(RTLD_NEXT, "eglSwapBuffers");
@@ -768,20 +981,32 @@ static void* init_thread(void*) {
         }
     } else {
         LOGE("eglSwapBuffers tidak ketemu — menu tidak akan tampil");
+        mark_step("HOOK=eglSwapBuffers:FAIL no-symbol");
     }
     install_input_hook();
+    mark_step("HOOK_DONE");
 
     LOGI("payload siap: sun=%d 1hit=%d freeplant=%d mower=%d addsun=%d gate=%d menu=%d",
          g_availSun, g_availOneHit, g_availFreePlant, g_availMower,
          g_availAddSun, g_gateFnsOk, g_menuReady);
-    write_status("READY", g_menuReady ? 1 : 0);
+    if (g_failed[0]) {
+        // Hanya hook yang gagal (resolve gagal sudah return di atas) —
+        // game tetap jalan, fitur yang gagal nonaktif.
+        char st[160];
+        std::snprintf(st, sizeof(st), "PARTIAL %s", g_failed);
+        mark_step("STATUS=PARTIAL");
+        write_status(st, g_menuReady ? 1 : 0);
+    } else {
+        mark_step("STATUS=READY");
+        write_status("READY", g_menuReady ? 1 : 0);
+    }
     return nullptr;
 }
 
 }  // namespace
 
 void payload_init() {
-    LOGI("payload_init: Hozin PvZ Injector v1.3 masuk ke proses target");
+    LOGI("payload_init: Hozin PvZ Injector v1.4 masuk ke proses target");
     pthread_t t;
     if (pthread_create(&t, nullptr, init_thread, nullptr) == 0)
         pthread_detach(t);
@@ -794,8 +1019,13 @@ void payload_init() {
 // ada pemanggilan blocking di jalur ini). Semua kerja berat (resolve
 // simbol, Dobby, ImGui) ada di init_thread. Marker CTOR_ENTER/RETURN
 // membuktikan di diagnosis berikutnya bahwa constructor sempat kembali.
+// v1.4: signal handler dipasang DI SINI (sebelum apa pun) supaya crash
+// di init thread pun meninggalkan jejak STATUS=CRASH.
 __attribute__((constructor)) static void on_load() {
+    install_crash_handler();
     ctor_marker("ENTER");
+    mark_step("CTOR_ENTER");
     payload_init();
     ctor_marker("RETURN");
+    mark_step("CTOR_RETURN");
 }
